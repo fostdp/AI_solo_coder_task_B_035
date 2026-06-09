@@ -94,42 +94,58 @@ public class WellConnectivityAnalyzer {
 
         log.info("Analyzing {} injection wells and {} production wells", injectionWells.size(), productionWells.size());
 
-        Map<String, List<WaterInjectionData>> injectionPressureData = new HashMap<>();
+        Map<String, double[]> injectionPressureMap = new HashMap<>();
+        Map<String, double[]> productionPressureMap = new HashMap<>();
+
         for (Well injectionWell : injectionWells) {
             List<WaterInjectionData> data = injectionDataRepository
                     .findByWellIdAndReportDateBetweenOrderByReportDate(
                             injectionWell.getWellId(), startDate, analysisDate);
-            injectionPressureData.put(injectionWell.getWellId(), data);
+            if (data.size() >= config.getMinAnalysisWindowDays()) {
+                double[] pressures = data.stream()
+                        .mapToDouble(d -> d.getInjectionPressure() != null ? d.getInjectionPressure() : 0.0)
+                        .toArray();
+                injectionPressureMap.put(injectionWell.getWellId(), pressures);
+            }
         }
 
-        List<WellConnectivity> results = new ArrayList<>();
+        for (Well productionWell : productionWells) {
+            List<WaterInjectionData> data = injectionDataRepository
+                    .findByWellIdAndReportDateBetweenOrderByReportDate(
+                            productionWell.getWellId(), startDate, analysisDate);
+            if (data.size() >= config.getMinAnalysisWindowDays()) {
+                double[] pressures = data.stream()
+                        .mapToDouble(d -> d.getInjectionPressure() != null ? d.getInjectionPressure() : 0.0)
+                        .toArray();
+                productionPressureMap.put(productionWell.getWellId(), pressures);
+            }
+        }
+
+        List<WellConnectivity> preliminaryResults = new ArrayList<>();
 
         for (Well injectionWell : injectionWells) {
-            List<WaterInjectionData> injData = injectionPressureData.get(injectionWell.getWellId());
-            if (injData == null || injData.size() < config.getMinAnalysisWindowDays()) {
-                continue;
-            }
-
-            double[] injPressure = injData.stream()
-                    .mapToDouble(d -> d.getInjectionPressure() != null ? d.getInjectionPressure() : 0.0)
-                    .toArray();
+            double[] injPressure = injectionPressureMap.get(injectionWell.getWellId());
+            if (injPressure == null) continue;
 
             for (Well productionWell : productionWells) {
+                double[] prodPressure = productionPressureMap.get(productionWell.getWellId());
+                if (prodPressure == null) continue;
+
                 Optional<WellConnectivity> existing = connectivityRepository
                         .findByInjectionWellIdAndProductionWellIdAndAnalysisDate(
                                 injectionWell.getWellId(), productionWell.getWellId(), analysisDate);
                 if (existing.isPresent()) {
-                    results.add(existing.get());
+                    preliminaryResults.add(existing.get());
                     continue;
                 }
 
                 try {
                     WellConnectivity connectivity = analyzeWellPairConnectivity(
-                            injectionWell, productionWell, injPressure,
+                            injectionWell, productionWell, injPressure, prodPressure,
                             startDate, analysisDate, windowDays,
                             maxTimeLagHours, significanceThreshold, config);
                     if (connectivity != null) {
-                        results.add(connectivity);
+                        preliminaryResults.add(connectivity);
                     }
                 } catch (Exception e) {
                     log.error("Failed to analyze connectivity between {} and {}",
@@ -138,8 +154,22 @@ public class WellConnectivityAnalyzer {
             }
         }
 
-        List<WellConnectivity> significantResults = results.stream()
+        if (config.isEnableGraphModelScreening() && injectionWells.size() > 1) {
+            preliminaryResults = performGraphModelScreening(
+                    preliminaryResults, injectionPressureMap, productionPressureMap, config);
+            long spuriousCount = preliminaryResults.stream()
+                    .filter(WellConnectivity::getIsSpuriousEdge)
+                    .count();
+            long retainedCount = preliminaryResults.stream()
+                    .filter(c -> !c.getIsSpuriousEdge())
+                    .count();
+            log.info("Graph model screening completed, retained {} of {} connections, filtered {} spurious edges",
+                    retainedCount, preliminaryResults.size(), spuriousCount);
+        }
+
+        List<WellConnectivity> significantResults = preliminaryResults.stream()
                 .filter(c -> request.getIncludeWeakConnections() || c.getIsSignificant())
+                .filter(c -> !c.getIsSpuriousEdge())
                 .collect(Collectors.toList());
 
         if (!significantResults.isEmpty()) {
@@ -153,22 +183,10 @@ public class WellConnectivityAnalyzer {
     }
 
     private WellConnectivity analyzeWellPairConnectivity(
-            Well injectionWell, Well productionWell, double[] injPressure,
+            Well injectionWell, Well productionWell, double[] injPressure, double[] prodPressure,
             LocalDate startDate, LocalDate analysisDate, int windowDays,
             int maxTimeLagHours, double significanceThreshold,
             AdvancedFeaturesProperties.Connectivity config) {
-
-        List<WaterInjectionData> prodDataList = injectionDataRepository
-                .findByWellIdAndReportDateBetweenOrderByReportDate(
-                        productionWell.getWellId(), startDate, analysisDate);
-
-        if (prodDataList.size() < config.getMinAnalysisWindowDays()) {
-            return null;
-        }
-
-        double[] prodPressure = prodDataList.stream()
-                .mapToDouble(d -> d.getInjectionPressure() != null ? d.getInjectionPressure() : 0.0)
-                .toArray();
 
         int minLength = Math.min(injPressure.length, prodPressure.length);
         if (minLength < config.getMinAnalysisWindowDays()) {
@@ -207,6 +225,10 @@ public class WellConnectivityAnalyzer {
         connectivity.setAnalysisWindowDays(windowDays);
         connectivity.setPressureDataQuality(dataQuality);
         connectivity.setIsSignificant(isSignificant);
+        connectivity.setPartialCorrelation(null);
+        connectivity.setConditionedWellCount(0);
+        connectivity.setIsSpuriousEdge(false);
+        connectivity.setGraphModelPValue(null);
 
         return connectivity;
     }
@@ -287,6 +309,297 @@ public class WellConnectivityAnalyzer {
         double tStatistic = correlation * Math.sqrt((sampleSize - 2) / (1 - correlation * correlation));
         double confidence = 1.0 - Math.exp(-Math.abs(tStatistic) / 3.0);
         return Math.min(Math.max(confidence, 0.0), 1.0);
+    }
+
+    public double calculatePartialCorrelation(double[] x, double[] y, List<double[]> controls) {
+        if (x.length < 3 || y.length < 3 || x.length != y.length) {
+            return 0.0;
+        }
+
+        int n = x.length;
+        int k = controls.size();
+
+        if (k == 0) {
+            return calculatePearsonCorrelation(x, y);
+        }
+
+        try {
+            double[][] data = new double[n][k + 2];
+            for (int i = 0; i < n; i++) {
+                data[i][0] = x[i];
+                data[i][1] = y[i];
+                for (int j = 0; j < k; j++) {
+                    data[i][j + 2] = controls.get(j)[i];
+                }
+            }
+
+            double[][] corrMatrix = calculateCorrelationMatrix(data);
+            double[][] invCorrMatrix = invertMatrix(corrMatrix);
+
+            if (invCorrMatrix == null) {
+                return calculatePearsonCorrelation(x, y);
+            }
+
+            double partialCorr = -invCorrMatrix[0][1] /
+                    Math.sqrt(Math.abs(invCorrMatrix[0][0] * invCorrMatrix[1][1]));
+
+            return Double.isNaN(partialCorr) ? 0.0 : partialCorr;
+
+        } catch (Exception e) {
+            log.warn("Failed to calculate partial correlation: {}", e.getMessage());
+            return calculatePearsonCorrelation(x, y);
+        }
+    }
+
+    private double[][] calculateCorrelationMatrix(double[][] data) {
+        int nVars = data[0].length;
+        int nObs = data.length;
+        double[][] corrMatrix = new double[nVars][nVars];
+
+        for (int i = 0; i < nVars; i++) {
+            for (int j = i; j < nVars; j++) {
+                if (i == j) {
+                    corrMatrix[i][j] = 1.0;
+                } else {
+                    double[] x = new double[nObs];
+                    double[] y = new double[nObs];
+                    for (int k = 0; k < nObs; k++) {
+                        x[k] = data[k][i];
+                        y[k] = data[k][j];
+                    }
+                    double corr = calculatePearsonCorrelation(x, y);
+                    corrMatrix[i][j] = corr;
+                    corrMatrix[j][i] = corr;
+                }
+            }
+        }
+        return corrMatrix;
+    }
+
+    private double[][] invertMatrix(double[][] matrix) {
+        int n = matrix.length;
+        double[][] augmented = new double[n][2 * n];
+
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                augmented[i][j] = matrix[i][j];
+            }
+            augmented[i][i + n] = 1.0;
+        }
+
+        for (int i = 0; i < n; i++) {
+            double max = Math.abs(augmented[i][i]);
+            int maxRow = i;
+            for (int k = i + 1; k < n; k++) {
+                if (Math.abs(augmented[k][i]) > max) {
+                    max = Math.abs(augmented[k][i]);
+                    maxRow = k;
+                }
+            }
+
+            double[] temp = augmented[i];
+            augmented[i] = augmented[maxRow];
+            augmented[maxRow] = temp;
+
+            if (Math.abs(augmented[i][i]) < 1e-10) {
+                return null;
+            }
+
+            double div = augmented[i][i];
+            for (int j = i; j < 2 * n; j++) {
+                augmented[i][j] /= div;
+            }
+
+            for (int k = 0; k < n; k++) {
+                if (k != i) {
+                    double factor = augmented[k][i];
+                    for (int j = i; j < 2 * n; j++) {
+                        augmented[k][j] -= factor * augmented[i][j];
+                    }
+                }
+            }
+        }
+
+        double[][] inverse = new double[n][n];
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                inverse[i][j] = augmented[i][j + n];
+            }
+        }
+        return inverse;
+    }
+
+    private List<WellConnectivity> performGraphModelScreening(
+            List<WellConnectivity> preliminaryResults,
+            Map<String, double[]> injectionPressureMap,
+            Map<String, double[]> productionPressureMap,
+            AdvancedFeaturesProperties.Connectivity config) {
+
+        Map<String, Map<String, WellConnectivity>> connectivityGraph = new HashMap<>();
+        for (WellConnectivity conn : preliminaryResults) {
+            connectivityGraph
+                    .computeIfAbsent(conn.getProductionWellId(), k -> new HashMap<>())
+                    .put(conn.getInjectionWellId(), conn);
+        }
+
+        for (Map.Entry<String, Map<String, WellConnectivity>> prodEntry : connectivityGraph.entrySet()) {
+            String prodWellId = prodEntry.getKey();
+            Map<String, WellConnectivity> connections = prodEntry.getValue();
+
+            if (connections.size() < 2) continue;
+
+            double[] prodPressure = productionPressureMap.get(prodWellId);
+            if (prodPressure == null) continue;
+
+            List<Map.Entry<String, WellConnectivity>> sortedConnections =
+                    connections.entrySet().stream()
+                            .sorted((a, b) -> Double.compare(
+                                    b.getValue().getConnectivityStrength(),
+                                    a.getValue().getConnectivityStrength()))
+                            .collect(Collectors.toList());
+
+            for (int i = 0; i < sortedConnections.size(); i++) {
+                Map.Entry<String, WellConnectivity> targetEntry = sortedConnections.get(i);
+                String targetInjId = targetEntry.getKey();
+                WellConnectivity targetConn = targetEntry.getValue();
+
+                double[] targetInjPressure = injectionPressureMap.get(targetInjId);
+                if (targetInjPressure == null) continue;
+
+                int minLen = Math.min(targetInjPressure.length, prodPressure.length);
+                double[] xAligned = Arrays.copyOfRange(targetInjPressure, targetInjPressure.length - minLen, targetInjPressure.length);
+                double[] yAligned = Arrays.copyOfRange(prodPressure, prodPressure.length - minLen, prodPressure.length);
+
+                List<double[]> controls = new ArrayList<>();
+                int controlCount = 0;
+                for (int j = 0; j < sortedConnections.size() && controlCount < config.getMaxConditioningVariables(); j++) {
+                    if (j == i) continue;
+                    String controlInjId = sortedConnections.get(j).getKey();
+                    double[] controlPressure = injectionPressureMap.get(controlInjId);
+                    if (controlPressure != null && controlPressure.length >= minLen) {
+                        double[] controlAligned = Arrays.copyOfRange(
+                                controlPressure, controlPressure.length - minLen, controlPressure.length);
+                        controls.add(controlAligned);
+                        controlCount++;
+                    }
+                }
+
+                double partialCorr = calculatePartialCorrelation(xAligned, yAligned, controls);
+                double pValue = calculatePartialCorrelationPValue(partialCorr, minLen, controls.size());
+
+                targetConn.setPartialCorrelation(partialCorr);
+                targetConn.setConditionedWellCount(controls.size());
+                targetConn.setGraphModelPValue(pValue);
+
+                double pearsonCorr = targetConn.getPearsonCorrelation() != null ?
+                        Math.abs(targetConn.getPearsonCorrelation()) : 0;
+                double partialCorrAbs = Math.abs(partialCorr);
+
+                if (pearsonCorr > config.getSignificanceThreshold() &&
+                        partialCorrAbs < config.getSpuriousEdgeThreshold()) {
+                    targetConn.setIsSpuriousEdge(true);
+                    targetConn.setIsSignificant(false);
+                    log.info("Identified spurious edge: {} -> {}, pearson={}, partial={}",
+                            targetInjId, prodWellId, String.format("%.4f", pearsonCorr),
+                            String.format("%.4f", partialCorrAbs));
+                } else if (partialCorrAbs < config.getPartialCorrelationThreshold()) {
+                    targetConn.setIsSignificant(false);
+                }
+            }
+        }
+
+        return preliminaryResults;
+    }
+
+    private double calculatePartialCorrelationPValue(double partialCorr, int sampleSize, int numControls) {
+        if (sampleSize <= numControls + 3) {
+            return 1.0;
+        }
+
+        double absCorr = Math.abs(partialCorr);
+        if (absCorr >= 1.0) {
+            return 0.0;
+        }
+
+        int df = sampleSize - numControls - 3;
+        double tStat = partialCorr * Math.sqrt(df / (1 - partialCorr * partialCorr));
+
+        double pValue = 2.0 * (1 - calculateTStudentCDF(Math.abs(tStat), df));
+        return Math.max(0.0, Math.min(1.0, pValue));
+    }
+
+    private double calculateTStudentCDF(double t, int df) {
+        if (df <= 0) return 0.5;
+
+        double x = (t + Math.sqrt(t * t + df)) / (2.0 * Math.sqrt(t * t + df));
+        double a = df / 2.0;
+        double b = df / 2.0;
+
+        return regularizedIncompleteBeta(x, a, b);
+    }
+
+    private double regularizedIncompleteBeta(double x, double a, double b) {
+        if (x <= 0.0) return 0.0;
+        if (x >= 1.0) return 1.0;
+
+        double bt = Math.exp(logGamma(a + b) - logGamma(a) - logGamma(b) +
+                a * Math.log(x) + b * Math.log(1.0 - x));
+
+        if (x < (a + 1.0) / (a + b + 2.0)) {
+            return bt * calculateBetaCF(x, a, b) / a;
+        } else {
+            return 1.0 - bt * calculateBetaCF(1.0 - x, b, a) / b;
+        }
+    }
+
+    private double logGamma(double x) {
+        double[] coef = {
+                76.18009172947146, -86.50532032941677,
+                24.01409824083091, -1.231739572450155,
+                0.1208650973866179e-2, -0.5395239384953e-5
+        };
+        double y = x;
+        double tmp = x + 5.5;
+        tmp -= (x + 0.5) * Math.log(tmp);
+        double ser = 1.000000000190015;
+        for (int j = 0; j < 6; j++) {
+            ser += coef[j] / ++y;
+        }
+        return -tmp + Math.log(2.5066282746310005 * ser / x);
+    }
+
+    private double calculateBetaCF(double x, double a, double b) {
+        int maxIter = 100;
+        double eps = 3.0e-7;
+        double qab = a + b;
+        double qap = a + 1.0;
+        double qam = a - 1.0;
+        double c = 1.0;
+        double d = 1.0 - qab * x / qap;
+        if (Math.abs(d) < 1e-30) d = 1e-30;
+        d = 1.0 / d;
+        double h = d;
+
+        for (int m = 1; m <= maxIter; m++) {
+            int m2 = 2 * m;
+            double aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+            d = 1.0 + aa * d;
+            if (Math.abs(d) < 1e-30) d = 1e-30;
+            c = 1.0 + aa / c;
+            if (Math.abs(c) < 1e-30) c = 1e-30;
+            d = 1.0 / d;
+            h *= d * c;
+            aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+            d = 1.0 + aa * d;
+            if (Math.abs(d) < 1e-30) d = 1e-30;
+            c = 1.0 + aa / c;
+            if (Math.abs(c) < 1e-30) c = 1e-30;
+            d = 1.0 / d;
+            double del = d * c;
+            h *= del;
+            if (Math.abs(del - 1.0) < eps) break;
+        }
+        return h;
     }
 
     @Transactional(readOnly = true)

@@ -83,6 +83,7 @@ public class InjectionProfileOptimizer {
         log.info("Starting profile adjustment for well: {}", request.getWellId());
 
         AdvancedFeaturesProperties.Profile config = properties.getProfile();
+        AdvancedFeaturesProperties.SmartWaterController controllerConfig = properties.getSmartWaterController();
         LocalDate profileDate = request.getProfileDate() != null ? request.getProfileDate() : LocalDate.now();
         double maxAdjustmentPct = request.getMaxAdjustmentPercentage() != null ?
                 request.getMaxAdjustmentPercentage() : config.getMaxAdjustmentPercentage();
@@ -92,6 +93,14 @@ public class InjectionProfileOptimizer {
 
         if (profiles.isEmpty()) {
             profiles = generateInitialProfiles(request.getWellId(), profileDate);
+        }
+
+        Map<Integer, Double> historicalPredictions = new HashMap<>();
+        Map<Integer, Double> historicalActuals = new HashMap<>();
+        if (controllerConfig.isEnableSmithPredictor()) {
+            loadHistoricalPredictionData(request.getWellId(), profileDate,
+                    controllerConfig.getFeedbackDelayHours(),
+                    historicalPredictions, historicalActuals);
         }
 
         Double currentTotal = profileRepository.sumCurrentInjectionByWellAndDate(request.getWellId(), profileDate);
@@ -112,6 +121,12 @@ public class InjectionProfileOptimizer {
         List<InjectionProfile> adjustedProfiles = calculateOptimalLayerAllocation(
                 profiles, totalCurrentVolume, targetTotalVolume,
                 maxAdjustmentPct, layerOverrides, config);
+
+        if (controllerConfig.isEnableSmithPredictor()) {
+            adjustedProfiles = applySmithPredictorCompensation(
+                    adjustedProfiles, historicalPredictions, historicalActuals,
+                    totalCurrentVolume, targetTotalVolume, controllerConfig);
+        }
 
         List<InjectionProfile> savedProfiles = profileRepository.saveAll(adjustedProfiles);
 
@@ -355,6 +370,167 @@ public class InjectionProfileOptimizer {
         }
 
         return success;
+    }
+
+    private void loadHistoricalPredictionData(String wellId, LocalDate currentDate,
+                                               int delayHours,
+                                               Map<Integer, Double> historicalPredictions,
+                                               Map<Integer, Double> historicalActuals) {
+        try {
+            LocalDate historyDate = currentDate.minusDays(Math.max(1, delayHours / 24 + 1));
+            List<InjectionProfile> historyProfiles = profileRepository
+                    .findByWellIdAndProfileDateOrderByLayerNumber(wellId, historyDate);
+
+            for (InjectionProfile profile : historyProfiles) {
+                if (profile.getPredictedVolume() != null) {
+                    historicalPredictions.put(profile.getLayerNumber(), profile.getPredictedVolume());
+                }
+                if (profile.getCurrentInjectionVolume() != null) {
+                    historicalActuals.put(profile.getLayerNumber(), profile.getCurrentInjectionVolume());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to load historical prediction data for well: {}", wellId, e);
+        }
+    }
+
+    private List<InjectionProfile> applySmithPredictorCompensation(
+            List<InjectionProfile> profiles,
+            Map<Integer, Double> historicalPredictions,
+            Map<Integer, Double> historicalActuals,
+            double currentTotal, double targetTotal,
+            AdvancedFeaturesProperties.SmartWaterController config) {
+
+        List<InjectionProfile> compensatedProfiles = new ArrayList<>();
+        double totalCompensatedVolume = 0.0;
+
+        for (InjectionProfile profile : profiles) {
+            InjectionProfile compensated = new InjectionProfile();
+            copyProfileFields(profile, compensated);
+
+            Integer layerNum = profile.getLayerNumber();
+            double currentVolume = profile.getCurrentInjectionVolume() != null ?
+                    profile.getCurrentInjectionVolume() : 0.0;
+            double suggestedVolume = profile.getSuggestedInjectionVolume() != null ?
+                    profile.getSuggestedInjectionVolume() : currentVolume;
+
+            double predictedVolume = suggestProcessModel(currentVolume, suggestedVolume, config);
+            compensated.setPredictedVolume(predictedVolume);
+
+            double modelError = 0.0;
+            if (historicalPredictions.containsKey(layerNum) &&
+                    historicalActuals.containsKey(layerNum)) {
+                double histPred = historicalPredictions.get(layerNum);
+                double histActual = historicalActuals.get(layerNum);
+                modelError = histActual - histPred;
+                compensated.setModelPredictionError(modelError);
+            }
+
+            double delayCompensated = calculateSmithPredictorOutput(
+                    currentVolume, suggestedVolume, predictedVolume,
+                    modelError, config);
+
+            double maxCompensation = currentVolume * config.getMaxOvershootCompensation();
+            double adjustment = delayCompensated - currentVolume;
+            if (Math.abs(adjustment) > maxCompensation) {
+                adjustment = Math.signum(adjustment) * maxCompensation;
+                delayCompensated = currentVolume + adjustment;
+                compensated.setOvershootMitigationApplied(true);
+            } else {
+                compensated.setOvershootMitigationApplied(false);
+            }
+
+            delayCompensated = Math.max(delayCompensated, 5.0);
+            compensated.setDelayCompensatedVolume(delayCompensated);
+            compensated.setSuggestedInjectionVolume(delayCompensated);
+            compensated.setFeedbackDelayHours(config.getFeedbackDelayHours());
+
+            double newAdjustment = delayCompensated - currentVolume;
+            compensated.setAdjustmentAmount(newAdjustment);
+            compensated.setAdjustmentDirection(compensated.determineAdjustmentDirection());
+
+            totalCompensatedVolume += delayCompensated;
+            compensatedProfiles.add(compensated);
+        }
+
+        if (Math.abs(totalCompensatedVolume - targetTotal) > 0.01 && !compensatedProfiles.isEmpty()) {
+            double scaleFactor = targetTotal / totalCompensatedVolume;
+            scaleFactor = Math.max(0.8, Math.min(1.2, scaleFactor));
+
+            for (InjectionProfile profile : compensatedProfiles) {
+                double scaledVolume = profile.getSuggestedInjectionVolume() * scaleFactor;
+                double currentVolume = profile.getCurrentInjectionVolume() != null ?
+                        profile.getCurrentInjectionVolume() : 0.0;
+                double maxAllowed = currentVolume * (1 + config.getMaxOvershootCompensation());
+                double minAllowed = currentVolume * (1 - config.getMaxOvershootCompensation());
+                scaledVolume = Math.max(minAllowed, Math.min(maxAllowed, scaledVolume));
+                scaledVolume = Math.max(scaledVolume, 5.0);
+
+                profile.setSuggestedInjectionVolume(scaledVolume);
+                profile.setDelayCompensatedVolume(scaledVolume);
+                profile.setAdjustmentAmount(scaledVolume - currentVolume);
+                profile.setAdjustmentDirection(profile.determineAdjustmentDirection());
+            }
+        }
+
+        log.info("Smith predictor compensation applied for {} layers. Overshoot mitigation applied to {} layers",
+                compensatedProfiles.size(),
+                compensatedProfiles.stream().filter(InjectionProfile::getOvershootMitigationApplied).count());
+
+        return compensatedProfiles;
+    }
+
+    private double suggestProcessModel(double currentVolume, double targetVolume,
+                                        AdvancedFeaturesProperties.SmartWaterController config) {
+        double processGain = 0.9;
+        double timeConstant = config.getFeedbackDelayHours();
+        double stepSize = 1.0;
+        int steps = config.getPredictionHorizonSteps();
+
+        double volume = currentVolume;
+        for (int i = 0; i < steps; i++) {
+            double error = targetVolume - volume;
+            double rate = processGain * error / timeConstant;
+            volume += rate * stepSize;
+        }
+
+        return volume;
+    }
+
+    private double calculateSmithPredictorOutput(double currentVolume, double targetVolume,
+                                                 double predictedVolume, double modelError,
+                                                 AdvancedFeaturesProperties.SmartWaterController config) {
+
+        double predictionError = modelError * config.getModelErrorCorrectionFactor();
+        double adjustedTarget = targetVolume - predictionError;
+
+        double baseAdjustment = (adjustedTarget - currentVolume) * config.getSmithPredictorGain();
+
+        double delayCompensation = (predictedVolume - currentVolume) *
+                (1.0 - Math.exp(-1.0 / config.getFeedbackDelayHours()));
+
+        double compensatedAdjustment = baseAdjustment - delayCompensation;
+
+        return currentVolume + compensatedAdjustment;
+    }
+
+    private void copyProfileFields(InjectionProfile source, InjectionProfile target) {
+        target.setId(source.getId());
+        target.setWellId(source.getWellId());
+        target.setLayerNumber(source.getLayerNumber());
+        target.setLayerName(source.getLayerName());
+        target.setProfileDate(source.getProfileDate());
+        target.setTopDepth(source.getTopDepth());
+        target.setBottomDepth(source.getBottomDepth());
+        target.setThickness(source.getThickness());
+        target.setPermeability(source.getPermeability());
+        target.setPorosity(source.getPorosity());
+        target.setCurrentInjectionVolume(source.getCurrentInjectionVolume());
+        target.setWaterAbsorptionRatio(source.getWaterAbsorptionRatio());
+        target.setStartingPressure(source.getStartingPressure());
+        target.setCurrentPressure(source.getCurrentPressure());
+        target.setSkinFactor(source.getSkinFactor());
+        target.setAllocationStatus(source.getAllocationStatus());
     }
 
     @Transactional(readOnly = true)

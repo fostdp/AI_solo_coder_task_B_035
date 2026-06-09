@@ -112,6 +112,26 @@ public class PumpingUnitFaultPredictor {
 
         Map<String, Object> analysisData = analyzeTimeSeriesData(data, config);
 
+        double workingConditionStability = calculateWorkingConditionStability(data, config);
+        analysisData.put("workingConditionStability", workingConditionStability);
+
+        double adaptiveThreshold = probabilityThreshold;
+        double thresholdAdjustmentFactor = 1.0;
+        if (config.isEnableAdaptiveThreshold()) {
+            AdaptiveThresholdResult thresholdResult = calculateAdaptiveThreshold(
+                    probabilityThreshold, workingConditionStability, analysisData, config);
+            adaptiveThreshold = thresholdResult.adjustedThreshold;
+            thresholdAdjustmentFactor = thresholdResult.adjustmentFactor;
+            analysisData.put("adaptiveThreshold", adaptiveThreshold);
+            analysisData.put("thresholdAdjustmentFactor", thresholdAdjustmentFactor);
+        }
+
+        TransferLearningResult transferResult = null;
+        if (config.isEnableTransferLearning()) {
+            transferResult = performTransferLearning(request.getWellId(), faultTypes, endTime, config);
+            analysisData.put("transferLearningResult", transferResult);
+        }
+
         List<FaultPrediction> predictions = new ArrayList<>();
 
         for (String faultType : faultTypes) {
@@ -129,9 +149,27 @@ public class PumpingUnitFaultPredictor {
 
                 FaultPrediction prediction = analyzeFaultType(
                         request.getWellId(), faultType, analysisData,
-                        endTime, windowHours, probabilityThreshold, config);
+                        endTime, windowHours, adaptiveThreshold, config);
 
                 if (prediction != null) {
+                    prediction.setWorkingConditionStability(workingConditionStability);
+
+                    if (config.isEnableAdaptiveThreshold()) {
+                        prediction.setAdaptiveThresholdApplied(true);
+                        prediction.setThresholdAdjustmentFactor(thresholdAdjustmentFactor);
+                    }
+
+                    if (transferResult != null && transferResult.faultAdjustments.containsKey(faultType)) {
+                        double originalProb = prediction.getFaultProbability();
+                        double transferredProb = transferResult.faultAdjustments.get(faultType);
+                        double combinedProb = combineTransferKnowledge(originalProb, transferredProb,
+                                transferResult.weight, config.getTransferLearningWeight());
+                        prediction.setFaultProbability(combinedProb);
+                        prediction.setTransferLearningApplied(true);
+                        prediction.setTransferKnowledgeSource(transferResult.sourceWells);
+                        prediction.setTransferredProbability(transferredProb);
+                    }
+
                     if (request.getGenerateMaintenanceRecommendation()) {
                         addMaintenanceRecommendation(prediction, config);
                     }
@@ -145,7 +183,7 @@ public class PumpingUnitFaultPredictor {
         }
 
         List<FaultPrediction> significantPredictions = predictions.stream()
-                .filter(p -> p.getFaultProbability() >= probabilityThreshold)
+                .filter(p -> p.getFaultProbability() >= adaptiveThreshold)
                 .collect(Collectors.toList());
 
         if (!significantPredictions.isEmpty()) {
@@ -158,10 +196,12 @@ public class PumpingUnitFaultPredictor {
                 publishFaultAlarms(saved, config);
             }
 
-            log.info("Saved {} fault predictions for well: {}. Critical: {}, Warning: {}",
+            log.info("Saved {} fault predictions for well: {}. Critical: {}, Warning: {}, Stability: {}, ThresholdFactor: {}",
                     saved.size(), request.getWellId(),
                     saved.stream().filter(p -> "CRITICAL".equals(p.getSeverityLevel())).count(),
-                    saved.stream().filter(p -> "WARNING".equals(p.getSeverityLevel())).count());
+                    saved.stream().filter(p -> "WARNING".equals(p.getSeverityLevel())).count(),
+                    String.format("%.4f", workingConditionStability),
+                    String.format("%.4f", thresholdAdjustmentFactor));
 
             return saved;
         }
@@ -701,5 +741,226 @@ public class PumpingUnitFaultPredictor {
         result.put("statistics", stats);
 
         return result;
+    }
+
+    private double calculateWorkingConditionStability(
+            List<PumpingUnitData> data, AdvancedFeaturesProperties.Fault config) {
+
+        if (data.size() < 2) {
+            return 1.0;
+        }
+
+        double[] currents = data.stream()
+                .mapToDouble(d -> d.getMotorCurrent() != null ? d.getMotorCurrent() : 0)
+                .toArray();
+        double[] fluidLevels = data.stream()
+                .mapToDouble(d -> d.getDynamicFluidLevel() != null ? d.getDynamicFluidLevel() : 0)
+                .toArray();
+        double[] pressures = data.stream()
+                .mapToDouble(d -> d.getCasingPressure() != null ? d.getCasingPressure() : 0)
+                .toArray();
+
+        double currentCV = calculateCoefficientOfVariation(currents);
+        double fluidCV = calculateCoefficientOfVariation(fluidLevels);
+        double pressureCV = calculateCoefficientOfVariation(pressures);
+
+        double maxCV = Math.max(currentCV, Math.max(fluidCV, pressureCV));
+        double stability = 1.0 / (1.0 + maxCV * 2.0);
+
+        double[] currentChanges = calculateAbsoluteChanges(currents);
+        double[] fluidChanges = calculateAbsoluteChanges(fluidLevels);
+        double avgCurrentChange = Arrays.stream(currentChanges).average().orElse(0);
+        double avgFluidChange = Arrays.stream(fluidChanges).average().orElse(0);
+
+        double normalizedCurrentChange = avgCurrentChange / (Math.max(1, Arrays.stream(currents).average().orElse(1)));
+        double normalizedFluidChange = avgFluidChange / (Math.max(1, Arrays.stream(fluidLevels).average().orElse(1)));
+        double changePenalty = 1.0 - Math.min(1.0, (normalizedCurrentChange + normalizedFluidChange) * 0.5);
+
+        stability = stability * 0.6 + changePenalty * 0.4;
+
+        return Math.max(0.1, Math.min(1.0, stability));
+    }
+
+    private double calculateCoefficientOfVariation(double[] data) {
+        if (data.length < 2) return 0;
+        double mean = Arrays.stream(data).average().orElse(0);
+        if (Math.abs(mean) < 1e-10) return 0;
+        double variance = Arrays.stream(data)
+                .map(d -> (d - mean) * (d - mean))
+                .average().orElse(0);
+        return Math.sqrt(variance) / Math.abs(mean);
+    }
+
+    private double[] calculateAbsoluteChanges(double[] data) {
+        if (data.length < 2) return new double[]{0};
+        double[] changes = new double[data.length - 1];
+        for (int i = 1; i < data.length; i++) {
+            changes[i - 1] = Math.abs(data[i] - data[i - 1]);
+        }
+        return changes;
+    }
+
+    private AdaptiveThresholdResult calculateAdaptiveThreshold(
+            double baseThreshold, double workingConditionStability,
+            Map<String, Object> analysisData, AdvancedFeaturesProperties.Fault config) {
+
+        double stabilityThreshold = config.getWorkingConditionStabilityThreshold();
+        double sensitivity = config.getAdaptiveThresholdSensitivity();
+        double minFactor = config.getMinThresholdAdjustmentFactor();
+        double maxFactor = config.getMaxThresholdAdjustmentFactor();
+
+        double adjustmentFactor;
+
+        if (workingConditionStability >= stabilityThreshold) {
+            adjustmentFactor = 1.0 - (1.0 - minFactor) * sensitivity *
+                    (workingConditionStability - stabilityThreshold) / (1.0 - stabilityThreshold);
+        } else {
+            adjustmentFactor = 1.0 + (maxFactor - 1.0) * sensitivity *
+                    (stabilityThreshold - workingConditionStability) / stabilityThreshold;
+        }
+
+        double currentDeviation = (double) analysisData.getOrDefault("currentDeviation", 0.0);
+        double fluidLevelDeviation = (double) analysisData.getOrDefault("fluidLevelDeviation", 0.0);
+        double dataQuality = (double) analysisData.getOrDefault("dataQuality", 1.0);
+
+        if (currentDeviation > 1.0 || fluidLevelDeviation > 1.0) {
+            adjustmentFactor *= (1.0 + 0.1 * sensitivity);
+        }
+
+        if (dataQuality < 0.7) {
+            adjustmentFactor *= (1.0 + 0.15 * sensitivity * (0.7 - dataQuality) / 0.7);
+        }
+
+        adjustmentFactor = Math.max(minFactor, Math.min(maxFactor, adjustmentFactor));
+        double adjustedThreshold = baseThreshold * adjustmentFactor;
+
+        return new AdaptiveThresholdResult(adjustedThreshold, adjustmentFactor);
+    }
+
+    private TransferLearningResult performTransferLearning(
+            String targetWellId, List<String> faultTypes, LocalDateTime endTime,
+            AdvancedFeaturesProperties.Fault config) {
+
+        TransferLearningResult result = new TransferLearningResult();
+        result.faultAdjustments = new HashMap<>();
+
+        Well targetWell = wellRepository.findByWellId(targetWellId).orElse(null);
+        if (targetWell == null) {
+            return result;
+        }
+
+        String blockName = targetWell.getBlockName();
+        List<Well> similarWells = wellRepository.findByBlockNameAndWellType(blockName, "production")
+                .stream()
+                .filter(w -> !targetWellId.equals(w.getWellId()))
+                .limit(5)
+                .collect(Collectors.toList());
+
+        if (similarWells.isEmpty()) {
+            return result;
+        }
+
+        LocalDateTime startTime = endTime.minusDays(config.getHistoricalReferenceDays());
+        List<String> sourceWellIds = new ArrayList<>();
+        double totalSimilarity = 0;
+
+        for (Well well : similarWells) {
+            double similarity = calculateWellSimilarity(targetWell, well);
+            if (similarity < 0.3) continue;
+
+            List<FaultPrediction> wellPredictions = faultPredictionRepository
+                    .findByWellIdAndPredictionTimeAfterOrderByPredictionTimeDesc(
+                            well.getWellId(), startTime);
+
+            if (wellPredictions.isEmpty()) continue;
+
+            double wellWeight = similarity * calculateHistoricalPredictionAccuracy(wellPredictions);
+            totalSimilarity += wellWeight;
+            sourceWellIds.add(well.getWellId());
+
+            for (String faultType : faultTypes) {
+                double avgProbability = wellPredictions.stream()
+                        .filter(p -> faultType.equals(p.getFaultType()))
+                        .mapToDouble(p -> p.getFaultProbability() != null ? p.getFaultProbability() : 0)
+                        .average().orElse(0);
+
+                double currentAdjustment = result.faultAdjustments.getOrDefault(faultType, 0.0);
+                currentAdjustment += avgProbability * wellWeight;
+                result.faultAdjustments.put(faultType, currentAdjustment);
+            }
+        }
+
+        if (totalSimilarity > 0) {
+            for (Map.Entry<String, Double> entry : result.faultAdjustments.entrySet()) {
+                double normalizedValue = entry.getValue() / totalSimilarity;
+                result.faultAdjustments.put(entry.getKey(), normalizedValue);
+            }
+            result.weight = Math.min(1.0, totalSimilarity / similarWells.size());
+            result.sourceWells = String.join(",", sourceWellIds);
+        }
+
+        return result;
+    }
+
+    private double calculateWellSimilarity(Well well1, Well well2) {
+        double score = 0;
+        int factors = 0;
+
+        if (well1.getArtificialLiftType() != null && well2.getArtificialLiftType() != null) {
+            score += well1.getArtificialLiftType().equals(well2.getArtificialLiftType()) ? 1.0 : 0.3;
+            factors++;
+        }
+
+        if (well1.getTotalDepth() != null && well2.getTotalDepth() != null) {
+            double depthDiff = Math.abs(well1.getTotalDepth() - well2.getTotalDepth());
+            score += Math.max(0, 1.0 - depthDiff / 1000.0);
+            factors++;
+        }
+
+        if (well1.getProductionZone() != null && well2.getProductionZone() != null) {
+            score += well1.getProductionZone().equals(well2.getProductionZone()) ? 1.0 : 0.5;
+            factors++;
+        }
+
+        return factors > 0 ? score / factors : 0.5;
+    }
+
+    private double calculateHistoricalPredictionAccuracy(List<FaultPrediction> predictions) {
+        double avgAccuracy = predictions.stream()
+                .filter(p -> p.getPredictionAccuracy() != null)
+                .mapToDouble(FaultPrediction::getPredictionAccuracy)
+                .average().orElse(0.5);
+
+        double confirmedRate = predictions.stream()
+                .filter(p -> p.getActualFaultOccurred() != null)
+                .mapToDouble(p -> p.getActualFaultOccurred() ? 1.0 : 0.0)
+                .average().orElse(0.5);
+
+        return 0.5 * Math.max(0.1, avgAccuracy) + 0.5 * Math.max(0.1, confirmedRate);
+    }
+
+    private double combineTransferKnowledge(double originalProb, double transferredProb,
+                                             double dataWeight, double configWeight) {
+
+        double effectiveWeight = configWeight * dataWeight;
+        double combined = originalProb * (1.0 - effectiveWeight) + transferredProb * effectiveWeight;
+
+        return Math.max(0, Math.min(0.99, combined));
+    }
+
+    static class AdaptiveThresholdResult {
+        final double adjustedThreshold;
+        final double adjustmentFactor;
+
+        AdaptiveThresholdResult(double adjustedThreshold, double adjustmentFactor) {
+            this.adjustedThreshold = adjustedThreshold;
+            this.adjustmentFactor = adjustmentFactor;
+        }
+    }
+
+    static class TransferLearningResult {
+        Map<String, Double> faultAdjustments;
+        double weight = 0.0;
+        String sourceWells = "";
     }
 }

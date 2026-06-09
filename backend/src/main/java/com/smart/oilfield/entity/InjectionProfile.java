@@ -76,6 +76,21 @@ public class InjectionProfile {
     @Column(name = "adjustment_success")
     private Boolean adjustmentSuccess;
 
+    @Column(name = "predicted_volume", precision = 10, scale = 2)
+    private Double predictedVolume;
+
+    @Column(name = "delay_compensated_volume", precision = 10, scale = 2)
+    private Double delayCompensatedVolume;
+
+    @Column(name = "model_prediction_error", precision = 10, scale = 4)
+    private Double modelPredictionError;
+
+    @Column(name = "overshoot_mitigation_applied")
+    private Boolean overshootMitigationApplied = false;
+
+    @Column(name = "feedback_delay_hours")
+    private Integer feedbackDelayHours;
+
     @Column(name = "create_time")
     private LocalDateTime createTime;
 

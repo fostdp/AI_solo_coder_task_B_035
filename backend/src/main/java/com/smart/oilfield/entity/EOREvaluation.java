@@ -113,6 +113,24 @@ public class EOREvaluation {
     @Column(name = "is_recommended")
     private Boolean isRecommended = false;
 
+    @Column(name = "history_matching_error", precision = 10, scale = 4)
+    private Double historyMatchingError;
+
+    @Column(name = "is_history_matched")
+    private Boolean isHistoryMatched = false;
+
+    @Column(name = "calibrated_oil_increment_factor", precision = 10, scale = 4)
+    private Double calibratedOilIncrementFactor;
+
+    @Column(name = "calibrated_water_cut_reduction", precision = 10, scale = 4)
+    private Double calibratedWaterCutReduction;
+
+    @Column(name = "optimization_iterations")
+    private Integer optimizationIterations;
+
+    @Column(name = "parameter_adjustment_ratio", precision = 10, scale = 4)
+    private Double parameterAdjustmentRatio;
+
     @Column(name = "create_time")
     private LocalDateTime createTime;
 

@@ -51,6 +51,18 @@ public class WellConnectivity {
     @Column(name = "is_significant")
     private Boolean isSignificant = false;
 
+    @Column(name = "partial_correlation", precision = 10, scale = 4)
+    private Double partialCorrelation;
+
+    @Column(name = "conditioned_well_count")
+    private Integer conditionedWellCount;
+
+    @Column(name = "is_spurious_edge")
+    private Boolean isSpuriousEdge = false;
+
+    @Column(name = "graph_model_pvalue", precision = 10, scale = 4)
+    private Double graphModelPValue;
+
     @Column(name = "create_time")
     private LocalDateTime createTime;
 

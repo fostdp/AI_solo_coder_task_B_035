@@ -78,14 +78,22 @@ public class EOREvaluationService {
 
         Map<String, Object> blockData = getBlockReservoirData(request.getBlockName(), evaluationDate);
 
+        Map<String, HistoricalMatchResult> historyMatchResults = new HashMap<>();
+        if (config.isEnableHistoryMatching()) {
+            historyMatchResults = performHistoryMatching(
+                    request.getBlockName(), evaluationDate, eorTypes, config);
+        }
+
         List<EOREvaluation> evaluations = new ArrayList<>();
 
         for (String eorType : eorTypes) {
             try {
                 EOREvaluationRequest.ScenarioParameter scenarioParam = getScenarioParameter(request, eorType);
+                HistoricalMatchResult matchResult = historyMatchResults.get(eorType);
+
                 EOREvaluation evaluation = evaluateScenario(
                         request.getBlockName(), eorType, evaluationDate, horizonMonths,
-                        oilPrice, discountRate, blockData, scenarioParam, config);
+                        oilPrice, discountRate, blockData, scenarioParam, matchResult, config);
                 if (evaluation != null) {
                     evaluation.setModelVersion(request.getModelVersion() != null ?
                             request.getModelVersion() : config.getModelVersion());
@@ -130,6 +138,7 @@ public class EOREvaluationService {
             String blockName, String eorType, LocalDate evaluationDate, int horizonMonths,
             BigDecimal oilPrice, double discountRate, Map<String, Object> blockData,
             EOREvaluationRequest.ScenarioParameter scenarioParam,
+            HistoricalMatchResult matchResult,
             AdvancedFeaturesProperties.Eor config) {
 
         Double currentOilProduction = (Double) blockData.getOrDefault("currentOilProduction", 100.0);
@@ -152,18 +161,34 @@ public class EOREvaluationService {
         double oilIncrementFactor = getOilIncrementFactor(eorType, config);
         double waterCutReduction = getWaterCutReduction(eorType, config);
 
+        double calibratedOilFactor = oilIncrementFactor;
+        double calibratedWaterCut = waterCutReduction;
+        boolean isMatched = false;
+        double matchError = 0.0;
+        int iterations = 0;
+        double adjustmentRatio = 1.0;
+
+        if (matchResult != null && matchResult.isMatchSuccessful()) {
+            calibratedOilFactor = matchResult.getCalibratedOilFactor();
+            calibratedWaterCut = matchResult.getCalibratedWaterCutFactor();
+            isMatched = true;
+            matchError = matchResult.getMatchError();
+            iterations = matchResult.getOptimizationIterations();
+            adjustmentRatio = matchResult.getParameterAdjustmentRatio();
+        }
+
         double permeabilityFactor = Math.min(permeability / 500.0, 1.0);
         double saturationFactor = Math.max(0, (remainingOilSaturation - 0.2) / 0.3);
         double temperatureFactor = calculateTemperatureFactor(eorType, reservoirTemp);
         double mobilityFactor = calculateMobilityFactor(eorType, permeability, porosity);
 
-        double adjustedOilIncrement = currentOilProduction * oilIncrementFactor *
+        double adjustedOilIncrement = currentOilProduction * calibratedOilFactor *
                 permeabilityFactor * saturationFactor * temperatureFactor * mobilityFactor;
 
         double monthlyOilIncrement = adjustedOilIncrement / horizonMonths;
         double totalOilIncrement = adjustedOilIncrement;
 
-        double predictedWaterCutReduction = waterCutReduction * temperatureFactor * mobilityFactor;
+        double predictedWaterCutReduction = calibratedWaterCut * temperatureFactor * mobilityFactor;
 
         double totalChemicalVolume = injectionRate * 30 * (horizonMonths / 2.0);
         double chemicalMass = totalChemicalVolume * concentration / 1_000_000;
@@ -219,6 +244,12 @@ public class EOREvaluationService {
         evaluation.setTechnicalFeasibility(technicalFeasibility);
         evaluation.setEconomicViability(economicViability);
         evaluation.setOverallScore(overallScore);
+        evaluation.setHistoryMatchingError(matchError);
+        evaluation.setIsHistoryMatched(isMatched);
+        evaluation.setCalibratedOilIncrementFactor(calibratedOilFactor);
+        evaluation.setCalibratedWaterCutReduction(calibratedWaterCut);
+        evaluation.setOptimizationIterations(iterations);
+        evaluation.setParameterAdjustmentRatio(adjustmentRatio);
 
         return evaluation;
     }
@@ -481,5 +512,244 @@ public class EOREvaluationService {
     @Transactional
     public List<EOREvaluation> saveAllEvaluations(List<EOREvaluation> evaluations) {
         return evaluationRepository.saveAll(evaluations);
+    }
+
+    private Map<String, HistoricalMatchResult> performHistoryMatching(
+            String blockName, LocalDate evaluationDate, List<String> eorTypes,
+            AdvancedFeaturesProperties.Eor config) {
+
+        Map<String, HistoricalMatchResult> results = new HashMap<>();
+
+        LocalDate startDate = evaluationDate.minusMonths(config.getHistoryMatchingWindowMonths());
+        List<BlockDailySummary> historicalData = summaryRepository
+                .findByBlockNameOrderBySummaryDateDesc(blockName)
+                .stream()
+                .filter(s -> !s.getSummaryDate().isAfter(evaluationDate) &&
+                             !s.getSummaryDate().isBefore(startDate))
+                .sorted(Comparator.comparing(BlockDailySummary::getSummaryDate))
+                .collect(Collectors.toList());
+
+        int minDataPoints = (int) config.getMinHistoryDataPoints();
+        if (historicalData.size() < minDataPoints) {
+            log.warn("Insufficient historical data for block {}: {} points, required: {}",
+                    blockName, historicalData.size(), minDataPoints);
+            for (String eorType : eorTypes) {
+                results.put(eorType, HistoricalMatchResult.failure(
+                        "Insufficient historical data: " + historicalData.size() + " points"));
+            }
+            return results;
+        }
+
+        double[] timeIndices = new double[historicalData.size()];
+        double[] oilProduction = new double[historicalData.size()];
+        double[] waterCut = new double[historicalData.size()];
+        double[] waterInjection = new double[historicalData.size()];
+
+        for (int i = 0; i < historicalData.size(); i++) {
+            BlockDailySummary summary = historicalData.get(i);
+            timeIndices[i] = i;
+            oilProduction[i] = summary.getTotalOilProduction() != null ?
+                    summary.getTotalOilProduction() / 1000.0 : 100.0;
+            waterCut[i] = summary.getAverageWaterCut() != null ?
+                    summary.getAverageWaterCut() : 80.0;
+            waterInjection[i] = summary.getTotalWaterInjection() != null ?
+                    summary.getTotalWaterInjection() / 1000.0 : 500.0;
+        }
+
+        double[] oilTrend = fitLinearRegression(timeIndices, oilProduction);
+        double[] waterCutTrend = fitLinearRegression(timeIndices, waterCut);
+        double[] injectionTrend = fitLinearRegression(timeIndices, waterInjection);
+
+        double baseOilDeclineRate = oilTrend[0] < 0 ? -oilTrend[0] / oilProduction[0] : 0.001;
+        double baseWaterCutRiseRate = waterCutTrend[0] > 0 ? waterCutTrend[0] / (100 - waterCut[0]) : 0.005;
+
+        double injectionOilRatio = calculateAverageRatio(waterInjection, oilProduction);
+
+        for (String eorType : eorTypes) {
+            HistoricalMatchResult result = performEorTypeHistoryMatching(
+                    eorType, historicalData, oilProduction, waterCut,
+                    baseOilDeclineRate, baseWaterCutRiseRate, injectionOilRatio, config);
+            results.put(eorType, result);
+        }
+
+        return results;
+    }
+
+    private HistoricalMatchResult performEorTypeHistoryMatching(
+            String eorType, List<BlockDailySummary> historicalData,
+            double[] oilProduction, double[] waterCut,
+            double baseOilDeclineRate, double baseWaterCutRiseRate,
+            double injectionOilRatio, AdvancedFeaturesProperties.Eor config) {
+
+        double defaultOilFactor = getOilIncrementFactor(eorType, config);
+        double defaultWaterCutFactor = getWaterCutReduction(eorType, config);
+
+        double optimizedOilFactor = defaultOilFactor;
+        double optimizedWaterCutFactor = defaultWaterCutFactor;
+        double bestMatchError = Double.MAX_VALUE;
+        int actualIterations = 0;
+
+        double learningRate = config.getOptimizationLearningRate();
+        double adjustmentFactor = config.getParameterAdjustmentFactor();
+        int maxIterations = config.getMaxOptimizationIterations();
+        double tolerance = config.getHistoryMatchingTolerance();
+        double maxDeviation = config.getMaximumAllowableDeviation();
+
+        for (int iter = 0; iter < maxIterations; iter++) {
+            actualIterations = iter + 1;
+            double totalError = 0;
+            double oilGradSum = 0;
+            double waterGradSum = 0;
+
+            int windowSize = Math.min(30, historicalData.size());
+            for (int i = windowSize; i < historicalData.size(); i++) {
+                double predictedOil = predictEorOilProduction(
+                        oilProduction[i - windowSize], optimizedOilFactor,
+                        baseOilDeclineRate, windowSize, injectionOilRatio);
+                double predictedWaterCut = predictEorWaterCut(
+                        waterCut[i - windowSize], optimizedWaterCutFactor,
+                        baseWaterCutRiseRate, windowSize);
+
+                double oilError = predictedOil - oilProduction[i];
+                double waterError = predictedWaterCut - waterCut[i];
+
+                totalError += oilError * oilError + waterError * waterError;
+
+                oilGradSum += oilError * (oilProduction[i - windowSize] * windowSize * 0.01);
+                waterGradSum += waterError * windowSize * 0.01;
+            }
+
+            int effectivePoints = historicalData.size() - windowSize;
+            double rmse = effectivePoints > 0 ? Math.sqrt(totalError / (2 * effectivePoints)) : 0;
+            double normalizedError = rmse / (Math.max(1, oilProduction[0]) * 0.1 + 1);
+
+            if (normalizedError < bestMatchError) {
+                bestMatchError = normalizedError;
+            }
+
+            if (normalizedError < tolerance) {
+                break;
+            }
+
+            if (effectivePoints > 0) {
+                double oilGradient = oilGradSum / effectivePoints;
+                double waterGradient = waterGradSum / effectivePoints;
+
+                optimizedOilFactor -= learningRate * oilGradient;
+                optimizedWaterCutFactor -= learningRate * waterGradient;
+
+                double minOilFactor = defaultOilFactor * (1 - maxDeviation);
+                double maxOilFactor = defaultOilFactor * (1 + maxDeviation);
+                optimizedOilFactor = Math.max(minOilFactor, Math.min(maxOilFactor, optimizedOilFactor));
+                optimizedOilFactor = defaultOilFactor + adjustmentFactor * (optimizedOilFactor - defaultOilFactor);
+
+                double minWaterCutFactor = defaultWaterCutFactor * (1 - maxDeviation);
+                double maxWaterCutFactor = defaultWaterCutFactor * (1 + maxDeviation);
+                optimizedWaterCutFactor = Math.max(minWaterCutFactor, Math.min(maxWaterCutFactor, optimizedWaterCutFactor));
+                optimizedWaterCutFactor = defaultWaterCutFactor + adjustmentFactor * (optimizedWaterCutFactor - defaultWaterCutFactor);
+            }
+
+            learningRate *= 0.99;
+        }
+
+        boolean matchSuccess = bestMatchError <= maxDeviation;
+        double paramAdjustmentRatio = Math.abs(optimizedOilFactor - defaultOilFactor) / defaultOilFactor
+                + Math.abs(optimizedWaterCutFactor - defaultWaterCutFactor) / defaultWaterCutFactor;
+
+        log.info("History matching for {}: oil factor={}->{}, water cut={}->{}, error={}, success={}",
+                eorType,
+                String.format("%.4f", defaultOilFactor), String.format("%.4f", optimizedOilFactor),
+                String.format("%.4f", defaultWaterCutFactor), String.format("%.4f", optimizedWaterCutFactor),
+                String.format("%.6f", bestMatchError), matchSuccess);
+
+        return new HistoricalMatchResult(
+                matchSuccess,
+                optimizedOilFactor,
+                optimizedWaterCutFactor,
+                bestMatchError,
+                actualIterations,
+                paramAdjustmentRatio,
+                matchSuccess ? null : "Match error exceeds tolerance: " + String.format("%.6f", bestMatchError)
+        );
+    }
+
+    private double predictEorOilProduction(double initialOil, double oilFactor,
+                                            double declineRate, int days, double injectionRatio) {
+        double baseProduction = initialOil * Math.exp(-declineRate * days / 30.0);
+        double eorEffect = oilFactor * initialOil * (1 - Math.exp(-days / 90.0));
+        double injectionEffect = 0.01 * injectionRatio * Math.log(1 + days / 30.0);
+        return baseProduction + eorEffect * (1 + injectionEffect);
+    }
+
+    private double predictEorWaterCut(double initialWaterCut, double waterCutFactor,
+                                       double riseRate, int days) {
+        double baseWaterCut = Math.min(95, initialWaterCut + riseRate * days / 30.0);
+        double eorReduction = waterCutFactor * (1 - Math.exp(-days / 60.0));
+        return Math.max(5, baseWaterCut - eorReduction);
+    }
+
+    private double[] fitLinearRegression(double[] x, double[] y) {
+        int n = x.length;
+        double sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+        for (int i = 0; i < n; i++) {
+            sumX += x[i];
+            sumY += y[i];
+            sumXY += x[i] * y[i];
+            sumX2 += x[i] * x[i];
+        }
+        double denominator = (n * sumX2 - sumX * sumX);
+        if (Math.abs(denominator) < 1e-10) {
+            return new double[]{0, sumY / n};
+        }
+        double slope = (n * sumXY - sumX * sumY) / denominator;
+        double intercept = (sumY - slope * sumX) / n;
+        return new double[]{slope, intercept};
+    }
+
+    private double calculateAverageRatio(double[] numerator, double[] denominator) {
+        double sum = 0;
+        int count = 0;
+        for (int i = 0; i < numerator.length; i++) {
+            if (denominator[i] > 0) {
+                sum += numerator[i] / denominator[i];
+                count++;
+            }
+        }
+        return count > 0 ? sum / count : 1.0;
+    }
+
+    static class HistoricalMatchResult {
+        private final boolean matchSuccessful;
+        private final double calibratedOilFactor;
+        private final double calibratedWaterCutFactor;
+        private final double matchError;
+        private final int optimizationIterations;
+        private final double parameterAdjustmentRatio;
+        private final String failureReason;
+
+        HistoricalMatchResult(boolean matchSuccessful, double calibratedOilFactor,
+                              double calibratedWaterCutFactor, double matchError,
+                              int optimizationIterations, double parameterAdjustmentRatio,
+                              String failureReason) {
+            this.matchSuccessful = matchSuccessful;
+            this.calibratedOilFactor = calibratedOilFactor;
+            this.calibratedWaterCutFactor = calibratedWaterCutFactor;
+            this.matchError = matchError;
+            this.optimizationIterations = optimizationIterations;
+            this.parameterAdjustmentRatio = parameterAdjustmentRatio;
+            this.failureReason = failureReason;
+        }
+
+        static HistoricalMatchResult failure(String reason) {
+            return new HistoricalMatchResult(false, 0, 0, Double.MAX_VALUE, 0, 0, reason);
+        }
+
+        public boolean isMatchSuccessful() { return matchSuccessful; }
+        public double getCalibratedOilFactor() { return calibratedOilFactor; }
+        public double getCalibratedWaterCutFactor() { return calibratedWaterCutFactor; }
+        public double getMatchError() { return matchError; }
+        public int getOptimizationIterations() { return optimizationIterations; }
+        public double getParameterAdjustmentRatio() { return parameterAdjustmentRatio; }
+        public String getFailureReason() { return failureReason; }
     }
 }

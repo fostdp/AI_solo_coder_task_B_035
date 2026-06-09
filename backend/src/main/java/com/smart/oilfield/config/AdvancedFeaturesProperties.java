@@ -29,6 +29,11 @@ public class AdvancedFeaturesProperties {
         private int autoAnalysisDaysInterval = 7;
         private String autoAnalysisSchedule = "0 0 3 * * ?";
         private boolean includeWeakConnectionsInMap = false;
+        private double partialCorrelationThreshold = 0.3;
+        private boolean enableGraphModelScreening = true;
+        private int maxConditioningVariables = 3;
+        private double graphModelSignificanceLevel = 0.05;
+        private double spuriousEdgeThreshold = 0.15;
     }
 
     @Data
@@ -70,6 +75,14 @@ public class AdvancedFeaturesProperties {
         private int autoEvaluationDaysInterval = 30;
         private String autoEvaluationSchedule = "0 0 5 * * ?";
         private String modelVersion = "v2.0";
+        private boolean enableHistoryMatching = true;
+        private int historyMatchingWindowMonths = 12;
+        private double historyMatchingTolerance = 0.05;
+        private int maxOptimizationIterations = 100;
+        private double optimizationLearningRate = 0.01;
+        private double parameterAdjustmentFactor = 0.8;
+        private double minHistoryDataPoints = 6;
+        private double maximumAllowableDeviation = 0.15;
     }
 
     @Data
@@ -97,6 +110,16 @@ public class AdvancedFeaturesProperties {
         private int valveLeakDowntimeHours = 8;
         private boolean enableAutoAlarm = true;
         private String modelVersion = "v1.5";
+        private boolean enableAdaptiveThreshold = true;
+        private boolean enableTransferLearning = true;
+        private double adaptiveThresholdSensitivity = 0.5;
+        private int workingConditionWindowHours = 24;
+        private double minThresholdAdjustmentFactor = 0.8;
+        private double maxThresholdAdjustmentFactor = 1.5;
+        private double transferLearningWeight = 0.3;
+        private int historicalReferenceDays = 30;
+        private double workingConditionStabilityThreshold = 0.3;
+        private double falsePositivePenaltyFactor = 0.9;
     }
 
     @Data
@@ -110,5 +133,11 @@ public class AdvancedFeaturesProperties {
         private boolean enableSimulation = true;
         private double simulationSuccessRate = 0.95;
         private int simulationDelayMs = 500;
+        private boolean enableSmithPredictor = true;
+        private int feedbackDelayHours = 6;
+        private double smithPredictorGain = 0.8;
+        private double maxOvershootCompensation = 0.3;
+        private double modelErrorCorrectionFactor = 0.1;
+        private int predictionHorizonSteps = 5;
     }
 }

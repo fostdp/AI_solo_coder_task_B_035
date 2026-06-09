@@ -94,6 +94,24 @@ public class FaultPrediction {
     @Column(name = "model_version", length = 50)
     private String modelVersion;
 
+    @Column(name = "working_condition_stability", precision = 5, scale = 4)
+    private Double workingConditionStability;
+
+    @Column(name = "adaptive_threshold_applied")
+    private Boolean adaptiveThresholdApplied = false;
+
+    @Column(name = "threshold_adjustment_factor", precision = 5, scale = 4)
+    private Double thresholdAdjustmentFactor;
+
+    @Column(name = "transfer_learning_applied")
+    private Boolean transferLearningApplied = false;
+
+    @Column(name = "transfer_knowledge_source", length = 100)
+    private String transferKnowledgeSource;
+
+    @Column(name = "transferred_probability", precision = 5, scale = 4)
+    private Double transferredProbability;
+
     @Column(name = "create_time")
     private LocalDateTime createTime;
 
