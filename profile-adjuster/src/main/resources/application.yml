@@ -1,0 +1,34 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: profile-adjuster-service
+  datasource:
+    url: jdbc:postgresql://localhost:5432/smart_oilfield
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+
+advanced:
+  profile:
+    auto-adjustment-schedule: "0 0 4 * * ?"
+
+smart-water-controller:
+  base-url: http://localhost:8081/api
+  enable-smith-predictor: true
+  feedback-delay-hours: 6
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus

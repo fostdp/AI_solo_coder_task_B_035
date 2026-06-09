@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>三次采油评估 - 智慧油田注水开发动态调控系统</title>
+    <link rel="stylesheet" href="../css/components.css" />
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <script src="../js/config.js"></script>
+    <script src="../js/components.js"></script>
+</head>
+<body>
+    <div class="component-page">
+        <header class="component-header">
+            <a href="../index.html" class="back-btn">← 返回首页</a>
+            <h1>🛢️ 三次采油评估</h1>
+            <div class="header-info">
+                <span id="current-time">--</span>
+                <span class="status-indicator online">在线</span>
+            </div>
+        </header>
+
+        <div class="component-content">
+            <aside class="component-sidebar">
+                <div class="panel-section">
+                    <h3>区块选择</h3>
+                    <select id="block-selector" class="form-control">
+                        <option value="ALL">全部区块</option>
+                    </select>
+                    <button class="btn btn-primary" style="width: 100%;" onclick="evaluateEOR()">
+                        📊 开始评估
+                    </button>
+                </div>
+
+                <div class="panel-section">
+                    <h3>评估参数</h3>
+                    <label class="checkbox-item">
+                        <input type="checkbox" id="include-polymer" checked>
+                        <span>聚合物驱</span>
+                    </label>
+                    <label class="checkbox-item">
+                        <input type="checkbox" id="include-surfactant" checked>
+                        <span>表面活性剂驱</span>
+                    </label>
+                    <label class="checkbox-item">
+                        <input type="checkbox" id="include-asp" checked>
+                        <span>三元复合驱</span>
+                    </label>
+                    <label class="checkbox-item">
+                        <input type="checkbox" id="include-co2" checked>
+                        <span>CO₂驱</span>
+                    </label>
+                    <label class="checkbox-item">
+                        <input type="checkbox" id="include-steam">
+                        <span>蒸汽驱</span>
+                    </label>
+                </div>
+
+                <div class="panel-section">
+                    <h3>优化目标</h3>
+                    <select id="optimization-target" class="form-control">
+                        <option value="recovery">最大化采收率</option>
+                        <option value="npv">最大化净现值</option>
+                        <option value="risk">最小化风险</option>
+                        <option value="balanced">综合平衡</option>
+                    </select>
+                </div>
+
+                <div class="panel-section">
+                    <h3>操作</h3>
+                    <button class="btn btn-success" style="width: 100%; margin-bottom: 10px;" onclick="runOptimization()">
+                        ⚙️ 参数优化
+                    </button>
+                    <button class="btn btn-warning" style="width: 100%;" onclick="exportReport()">
+                        📑 导出报告
+                    </button>
+                </div>
+
+                <div class="panel-section">
+                    <h3>评估指标说明</h3>
+                    <div style="font-size: 12px; color: #90a4ae; line-height: 1.6;">
+                        <p><strong>采收率:</strong> 原油采出程度百分比</p>
+                        <p><strong>经济效益:</strong> 方案净现值评估</p>
+                        <p><strong>技术可行性:</strong> 现有技术实施难度</p>
+                        <p><strong>环境影响:</strong> 对环境的影响程度</p>
+                        <p><strong>实施周期:</strong> 项目建设投产时间</p>
+                        <p><strong>风险等级:</strong> 技术和经济风险</p>
+                    </div>
+                </div>
+            </aside>
+
+            <main class="component-main">
+                <div class="info-cards">
+                    <div class="info-card primary">
+                        <div class="label">最佳方案</div>
+                        <div class="value" id="best-scheme">--</div>
+                        <div class="unit"></div>
+                    </div>
+                    <div class="info-card success">
+                        <div class="label">预期采收率</div>
+                        <div class="value" id="expected-recovery">--</div>
+                        <div class="unit">%</div>
+                    </div>
+                    <div class="info-card warning">
+                        <div class="label">净现值</div>
+                        <div class="value" id="expected-npv">--</div>
+                        <div class="unit">万元</div>
+                    </div>
+                    <div class="info-card danger">
+                        <div class="label">风险等级</div>
+                        <div class="value" id="risk-level">--</div>
+                        <div class="unit"></div>
+                    </div>
+                </div>
+
+                <div class="charts-grid">
+                    <div class="chart-card">
+                        <h4>EOR方案对比雷达图</h4>
+                        <div class="chart-container" id="radar-chart"></div>
+                    </div>
+                    <div class="chart-card">
+                        <h4>历史拟合曲线</h4>
+                        <div class="chart-container" id="history-chart"></div>
+                    </div>
+                </div>
+
+                <div class="chart-card">
+                    <h4>参数优化进度</h4>
+                    <div id="optimization-container">
+                        <div class="no-data">请点击"参数优化"按钮开始优化</div>
+                    </div>
+                </div>
+
+                <div class="chart-card" style="min-height: 400px;">
+                    <h4>方案推荐列表</h4>
+                    <div style="overflow-x: auto;">
+                        <table class="data-table" id="recommendation-table">
+                            <thead>
+                                <tr>
+                                    <th>排名</th>
+                                    <th>方案名称</th>
+                                    <th>预期采收率 (%)</th>
+                                    <th>净现值 (万元)</th>
+                                    <th>实施周期</th>
+                                    <th>风险等级</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="recommendation-table-body">
+                                <tr>
+                                    <td colspan="7" style="text-align: center; padding: 40px; color: #546e7a;">
+                                        请先运行EOR评估
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script>
+        let radarChart = null;
+        let historyChart = null;
+        let currentData = null;
+        let isOptimizing = false;
+
+        async function init() {
+            await ComponentUtils.loadBlocks('block-selector');
+            initCharts();
+        }
+
+        function initCharts() {
+            radarChart = echarts.init(document.getElementById('radar-chart'), 'dark');
+            historyChart = echarts.init(document.getElementById('history-chart'), 'dark');
+
+            window.addEventListener('resize', () => {
+                radarChart.resize();
+                historyChart.resize();
+            });
+        }
+
+        async function evaluateEOR() {
+            const blockName = document.getElementById('block-selector').value;
+            const btn = event.target;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<span class="loading"></span> 评估中...';
+            btn.disabled = true;
+
+            try {
+                let data;
+                try {
+                    data = await ComponentUtils.fetchData(`/eor/block/${blockName}/comparative`);
+                } catch (e) {
+                    console.log('Using mock data');
+                    data = ComponentUtils.getMockEORData();
+                }
+                
+                currentData = data;
+                updateCharts(data);
+                updateStats(data);
+                updateTable(data);
+            } catch (error) {
+                console.error('EOR evaluation failed:', error);
+                alert('评估失败，请稍后重试');
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            }
+        }
+
+        function updateCharts(data) {
+            const { indicators, scenarios, historyData } = data;
+
+            const radarOption = ComponentUtils.createRadarOption(indicators, scenarios);
+            radarChart.setOption(radarOption);
+
+            const historyOption = {
+                title: {
+                    text: '生产数据拟合对比',
+                    textStyle: {
+                        color: '#4fc3f7',
+                        fontSize: 14
+                    },
+                    left: 'center'
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    backgroundColor: 'rgba(13, 33, 55, 0.95)',
+                    borderColor: '#2d5a87',
+                    textStyle: {
+                        color: '#e0e6ed'
+                    }
+                },
+                legend: {
+                    data: ['实际产量', '模拟产量'],
+                    textStyle: {
+                        color: '#90a4ae'
+                    },
+                    top: 30
+                },
+                grid: {
+                    left: '3%',
+                    right: '4%',
+                    bottom: '3%',
+                    top: 80,
+                    containLabel: true
+                },
+                xAxis: {
+                    type: 'category',
+                    data: historyData.months,
+                    axisLine: {
+                        lineStyle: {
+                            color: '#2d5a87'
+                        }
+                    },
+                    axisLabel: {
+                        color: '#90a4ae'
+                    }
+                },
+                yAxis: {
+                    type: 'value',
+                    name: '产量 (t/d)',
+                    axisLine: {
+                        lineStyle: {
+                            color: '#2d5a87'
+                        }
+                    },
+                    axisLabel: {
+                        color: '#90a4ae'
+                    },
+                    splitLine: {
+                        lineStyle: {
+                            color: '#1e3a5f'
+                        }
+                    }
+                },
+                series: [
+                    {
+                        name: '实际产量',
+                        type: 'line',
+                        data: historyData.actual,
+                        smooth: true,
+                        lineStyle: {
+                            color: '#4fc3f7',
+                            width: 3
+                        },
+                        itemStyle: {
+                            color: '#4fc3f7'
+                        },
+                        symbol: 'circle',
+                        symbolSize: 8
+                    },
+                    {
+                        name: '模拟产量',
+                        type: 'line',
+                        data: historyData.simulated,
+                        smooth: true,
+                        lineStyle: {
+                            color: '#ff9800',
+                            width: 2,
+                            type: 'dashed'
+                        },
+                        itemStyle: {
+                            color: '#ff9800'
+                        },
+                        symbol: 'diamond',
+                        symbolSize: 8
+                    }
+                ]
+            };
+            historyChart.setOption(historyOption);
+        }
+
+        function updateStats(data) {
+            const { recommendations } = data;
+            if (recommendations && recommendations.length > 0) {
+                const best = recommendations[0];
+                document.getElementById('best-scheme').textContent = best.name;
+                document.getElementById('expected-recovery').textContent = best.recovery;
+                document.getElementById('expected-npv').textContent = best.npv;
+                document.getElementById('risk-level').textContent = best.risk;
+
+                const riskEl = document.getElementById('risk-level');
+                if (best.risk === '低') {
+                    riskEl.style.color = '#4caf50';
+                } else if (best.risk === '中' || best.risk === '中高') {
+                    riskEl.style.color = '#ff9800';
+                } else {
+                    riskEl.style.color = '#f44336';
+                }
+            }
+        }
+
+        function updateTable(data) {
+            const { recommendations } = data;
+            const tbody = document.getElementById('recommendation-table-body');
+            
+            tbody.innerHTML = recommendations.map(rec => {
+                const riskClass = rec.risk === '低' ? 'success' : rec.risk === '中' || rec.risk === '中高' ? 'warning' : 'danger';
+                const rankBadge = rec.rank === 1 ? 'badge-success' : rec.rank === 2 ? 'badge-warning' : 'badge-info';
+                
+                return `
+                    <tr>
+                        <td><span class="badge ${rankBadge}">第${rec.rank}名</span></td>
+                        <td><strong style="color: #4fc3f7;">${rec.name}</strong></td>
+                        <td style="font-weight: 600; color: #4caf50;">${rec.recovery}%</td>
+                        <td style="font-weight: 600;">${rec.npv.toLocaleString()}</td>
+                        <td style="color: #90a4ae;">${rec.period}</td>
+                        <td><span class="badge badge-${riskClass}">${rec.risk}</span></td>
+                        <td>
+                            <button class="btn btn-primary" style="padding: 4px 12px; font-size: 12px;" onclick="viewDetail(${rec.rank})">
+                                详情
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        async function runOptimization() {
+            if (isOptimizing) return;
+            isOptimizing = true;
+
+            const btn = event.target;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<span class="loading"></span> 优化中...';
+            btn.disabled = true;
+
+            try {
+                if (!currentData) {
+                    await evaluateEOR();
+                }
+
+                const { optimizationProgress } = currentData;
+                const container = document.getElementById('optimization-container');
+                
+                let html = '';
+                optimizationProgress.forEach((param, index) => {
+                    const progressClass = param.value >= 80 ? 'success' : param.value >= 50 ? 'warning' : 'danger';
+                    html += `
+                        <div style="margin-bottom: 16px;">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                                <span style="font-size: 13px; color: #e0e6ed;">${param.name}</span>
+                                <span style="font-size: 13px; font-weight: 600; color: #4fc3f7;">${param.value}%</span>
+                            </div>
+                            <div class="progress-bar ${progressClass}">
+                                <div class="progress-fill" style="width: 0%;" id="progress-${index}"></div>
+                            </div>
+                        </div>
+                    `;
+                });
+                container.innerHTML = html;
+
+                for (let i = 0; i < optimizationProgress.length; i++) {
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                    const progressEl = document.getElementById(`progress-${i}`);
+                    if (progressEl) {
+                        progressEl.style.width = optimizationProgress[i].value + '%';
+                    }
+                }
+
+                setTimeout(() => {
+                    container.innerHTML += `
+                        <div style="text-align: center; padding: 16px;">
+                            <span class="status-indicator online">优化完成</span>
+                        </div>
+                    `;
+                }, 500);
+
+            } catch (error) {
+                console.error('Optimization failed:', error);
+                alert('优化失败，请稍后重试');
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+                isOptimizing = false;
+            }
+        }
+
+        function exportReport() {
+            if (!currentData) {
+                alert('请先运行EOR评估');
+                return;
+            }
+
+            const { recommendations, historyData } = currentData;
+            let report = `# 三次采油(EOR)评估报告\n\n`;
+            report += `生成时间: ${new Date().toLocaleString('zh-CN')}\n\n`;
+            report += `## 方案推荐\n\n`;
+            report += `| 排名 | 方案名称 | 预期采收率 | 净现值(万元) | 实施周期 | 风险等级 |\n`;
+            report += `|------|----------|------------|--------------|----------|----------|\n`;
+            
+            recommendations.forEach(rec => {
+                report += `| ${rec.rank} | ${rec.name} | ${rec.recovery}% | ${rec.npv.toLocaleString()} | ${rec.period} | ${rec.risk} |\n`;
+            });
+
+            report += `\n## 最佳方案: ${recommendations[0].name}\n\n`;
+            report += `- 预期采收率: ${recommendations[0].recovery}%\n`;
+            report += `- 净现值: ${recommendations[0].npv.toLocaleString()}万元\n`;
+            report += `- 实施周期: ${recommendations[0].period}\n`;
+            report += `- 风险等级: ${recommendations[0].risk}\n`;
+
+            const blob = new Blob([report], { type: 'text/markdown;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `EOR评估报告_${new Date().toISOString().split('T')[0]}.md`;
+            a.click();
+            URL.revokeObjectURL(url);
+
+            alert('报告导出成功！');
+        }
+
+        function viewDetail(rank) {
+            const rec = currentData.recommendations.find(r => r.rank === rank);
+            if (rec) {
+                alert(`方案详情:\n\n名称: ${rec.name}\n预期采收率: ${rec.recovery}%\n净现值: ${rec.npv.toLocaleString()}万元\n实施周期: ${rec.period}\n风险等级: ${rec.risk}\n\n建议: 该方案综合评分排名第${rank}，建议结合实际情况进行决策。`);
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>

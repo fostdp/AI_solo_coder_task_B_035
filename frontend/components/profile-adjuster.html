@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>注水剖面调整 - 智慧油田注水开发动态调控系统</title>
+    <link rel="stylesheet" href="../css/components.css" />
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <script src="../js/config.js"></script>
+    <script src="../js/components.js"></script>
+</head>
+<body>
+    <div class="component-page">
+        <header class="component-header">
+            <a href="../index.html" class="back-btn">← 返回首页</a>
+            <h1>💧 注水剖面调整</h1>
+            <div class="header-info">
+                <span id="current-time">--</span>
+                <span class="status-indicator online">在线</span>
+            </div>
+        </header>
+
+        <div class="component-content">
+            <aside class="component-sidebar">
+                <div class="panel-section">
+                    <h3>注水井选择</h3>
+                    <select id="well-selector" class="form-control">
+                        <option value="">请选择注水井</option>
+                    </select>
+                    <button class="btn btn-primary" style="width: 100%;" onclick="loadProfile()">
+                        📊 加载剖面
+                    </button>
+                </div>
+
+                <div class="panel-section">
+                    <h3>控制参数</h3>
+                    <div style="font-size: 12px; color: #90a4ae; margin-bottom: 8px;">
+                        史密斯预估器增益
+                    </div>
+                    <input type="range" id="smith-gain" class="form-control" 
+                           min="0.1" max="2.0" step="0.1" value="1.0" 
+                           oninput="updateGainValue(this.value)">
+                    <div style="text-align: center; color: #4fc3f7; font-weight: 600;" id="gain-value">1.0</div>
+                    
+                    <div style="font-size: 12px; color: #90a4ae; margin-bottom: 8px; margin-top: 16px;">
+                        超调抑制阈值
+                    </div>
+                    <input type="range" id="overshoot-threshold" class="form-control" 
+                           min="1.0" max="10.0" step="0.5" value="5.0" 
+                           oninput="updateThresholdValue(this.value)">
+                    <div style="text-align: center; color: #ff9800; font-weight: 600;" id="threshold-value">5.0%</div>
+                </div>
+
+                <div class="panel-section">
+                    <h3>超调抑制状态</h3>
+                    <div id="overshoot-status">
+                        <div class="no-data">请先加载剖面数据</div>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h3>配水器控制</h3>
+                    <button class="btn btn-success" style="width: 100%; margin-bottom: 10px;" onclick="sendCommand()">
+                        📤 下发配水指令
+                    </button>
+                    <button class="btn btn-warning" style="width: 100%;" onclick="optimizeProfile()">
+                        ⚙️ 自动优化
+                    </button>
+                </div>
+
+                <div class="panel-section">
+                    <h3>执行历史</h3>
+                    <div id="command-history" style="max-height: 200px; overflow-y: auto;">
+                        <div class="no-data">暂无执行记录</div>
+                    </div>
+                </div>
+            </aside>
+
+            <main class="component-main">
+                <div class="info-cards">
+                    <div class="info-card primary">
+                        <div class="label">当前总注水量</div>
+                        <div class="value" id="total-injection">--</div>
+                        <div class="unit">m³/d</div>
+                    </div>
+                    <div class="info-card success">
+                        <div class="label">目标总注水量</div>
+                        <div class="value" id="target-injection">--</div>
+                        <div class="unit">m³/d</div>
+                    </div>
+                    <div class="info-card warning">
+                        <div class="label">当前超调量</div>
+                        <div class="value" id="current-overshoot">--</div>
+                        <div class="unit">%</div>
+                    </div>
+                    <div class="info-card danger">
+                        <div class="label">分层数量</div>
+                        <div class="value" id="layer-count">--</div>
+                        <div class="unit">层</div>
+                    </div>
+                </div>
+
+                <div class="charts-grid">
+                    <div class="chart-card">
+                        <h4>分层注水量柱状图</h4>
+                        <div class="chart-container" id="injection-chart"></div>
+                    </div>
+                    <div class="chart-card">
+                        <h4>史密斯预估器补偿效果</h4>
+                        <div class="chart-container" id="smith-chart"></div>
+                    </div>
+                </div>
+
+                <div class="chart-card" style="min-height: 400px;">
+                    <h4>分层配水详情</h4>
+                    <div style="overflow-x: auto;">
+                        <table class="data-table" id="profile-table">
+                            <thead>
+                                <tr>
+                                    <th>层位</th>
+                                    <th>当前注水量 (m³/d)</th>
+                                    <th>目标注水量 (m³/d)</th>
+                                    <th>调整量 (m³/d)</th>
+                                    <th>调整幅度</th>
+                                    <th>配水器状态</th>
+                                </tr>
+                            </thead>
+                            <tbody id="profile-table-body">
+                                <tr>
+                                    <td colspan="6" style="text-align: center; padding: 40px; color: #546e7a;">
+                                        请先选择注水井并加载剖面
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script>
+        let injectionChart = null;
+        let smithChart = null;
+        let currentData = null;
+        let commandHistory = [];
+
+        async function init() {
+            await loadWells();
+            initCharts();
+        }
+
+        async function loadWells() {
+            try {
+                const wells = await ComponentUtils.fetchData('/wells?wellType=INJECTION');
+                const selector = document.getElementById('well-selector');
+                selector.innerHTML = '<option value="">请选择注水井</option>';
+                wells.forEach(well => {
+                    const option = document.createElement('option');
+                    option.value = well.wellId;
+                    option.textContent = well.wellName;
+                    selector.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Failed to load wells:', error);
+                const mockWells = ['W1', 'W2', 'W3', 'W4', 'W5'];
+                const selector = document.getElementById('well-selector');
+                selector.innerHTML = '<option value="">请选择注水井</option>';
+                mockWells.forEach(wellId => {
+                    const option = document.createElement('option');
+                    option.value = wellId;
+                    option.textContent = wellId;
+                    selector.appendChild(option);
+                });
+            }
+        }
+
+        function initCharts() {
+            injectionChart = echarts.init(document.getElementById('injection-chart'), 'dark');
+            smithChart = echarts.init(document.getElementById('smith-chart'), 'dark');
+
+            window.addEventListener('resize', () => {
+                injectionChart.resize();
+                smithChart.resize();
+            });
+        }
+
+        async function loadProfile() {
+            const wellId = document.getElementById('well-selector').value;
+            if (!wellId) {
+                alert('请先选择注水井');
+                return;
+            }
+
+            const btn = event.target;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<span class="loading"></span> 加载中...';
+            btn.disabled = true;
+
+            try {
+                let data;
+                try {
+                    data = await ComponentUtils.fetchData(`/injection-profile/well/${wellId}/summary`);
+                } catch (e) {
+                    console.log('Using mock data');
+                    data = ComponentUtils.getMockProfileData();
+                }
+                
+                currentData = data;
+                updateCharts(data);
+                updateStats(data);
+                updateTable(data);
+                updateOvershootStatus(data);
+            } catch (error) {
+                console.error('Load profile failed:', error);
+                alert('加载剖面失败，请稍后重试');
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            }
+        }
+
+        function updateCharts(data) {
+            const { layers, currentInjection, targetInjection, smithData } = data;
+
+            const injectionOption = ComponentUtils.createBarOption(
+                '分层注水量对比',
+                layers,
+                [
+                    { name: '当前注水量', data: currentInjection },
+                    { name: '目标注水量', data: targetInjection }
+                ],
+                ['#2196f3', '#4caf50']
+            );
+            injectionChart.setOption(injectionOption);
+
+            const smithOption = {
+                title: {
+                    text: '控制效果对比',
+                    textStyle: {
+                        color: '#4fc3f7',
+                        fontSize: 14
+                    },
+                    left: 'center'
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    backgroundColor: 'rgba(13, 33, 55, 0.95)',
+                    borderColor: '#2d5a87',
+                    textStyle: {
+                        color: '#e0e6ed'
+                    }
+                },
+                legend: {
+                    data: ['传统控制', '史密斯预估补偿'],
+                    textStyle: {
+                        color: '#90a4ae'
+                    },
+                    top: 30
+                },
+                grid: {
+                    left: '3%',
+                    right: '4%',
+                    bottom: '3%',
+                    top: 80,
+                    containLabel: true
+                },
+                xAxis: {
+                    type: 'category',
+                    data: smithData.time,
+                    axisLine: {
+                        lineStyle: {
+                            color: '#2d5a87'
+                        }
+                    },
+                    axisLabel: {
+                        color: '#90a4ae'
+                    }
+                },
+                yAxis: {
+                    type: 'value',
+                    name: '控制精度 (%)',
+                    axisLine: {
+                        lineStyle: {
+                            color: '#2d5a87'
+                        }
+                    },
+                    axisLabel: {
+                        color: '#90a4ae'
+                    },
+                    splitLine: {
+                        lineStyle: {
+                            color: '#1e3a5f'
+                        }
+                    }
+                },
+                series: [
+                    {
+                        name: '传统控制',
+                        type: 'line',
+                        data: smithData.traditional,
+                        smooth: true,
+                        lineStyle: {
+                            color: '#f44336',
+                            width: 2,
+                            type: 'dashed'
+                        },
+                        itemStyle: {
+                            color: '#f44336'
+                        }
+                    },
+                    {
+                        name: '史密斯预估补偿',
+                        type: 'line',
+                        data: smithData.compensated,
+                        smooth: true,
+                        lineStyle: {
+                            color: '#4caf50',
+                            width: 3
+                        },
+                        itemStyle: {
+                            color: '#4caf50'
+                        },
+                        areaStyle: {
+                            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                                { offset: 0, color: 'rgba(76, 175, 80, 0.3)' },
+                                { offset: 1, color: 'rgba(76, 175, 80, 0.05)' }
+                            ])
+                        }
+                    }
+                ]
+            };
+            smithChart.setOption(smithOption);
+        }
+
+        function updateStats(data) {
+            const { layers, currentInjection, targetInjection, overshootStatus } = data;
+            
+            const totalCurrent = currentInjection.reduce((a, b) => a + b, 0);
+            const totalTarget = targetInjection.reduce((a, b) => a + b, 0);
+
+            document.getElementById('total-injection').textContent = totalCurrent.toFixed(1);
+            document.getElementById('target-injection').textContent = totalTarget.toFixed(1);
+            document.getElementById('current-overshoot').textContent = overshootStatus.currentOvershoot.toFixed(2);
+            document.getElementById('layer-count').textContent = layers.length;
+
+            const overshootEl = document.getElementById('current-overshoot');
+            if (overshootStatus.currentOvershoot > overshootStatus.threshold) {
+                overshootEl.style.color = '#f44336';
+            } else {
+                overshootEl.style.color = '#4caf50';
+            }
+        }
+
+        function updateOvershootStatus(data) {
+            const { overshootStatus } = data;
+            const statusHtml = `
+                <div style="text-align: center; padding: 16px;">
+                    <div class="status-indicator ${overshootStatus.enabled ? 'online' : 'offline'}" style="margin-bottom: 16px;">
+                        ${overshootStatus.enabled ? '超调抑制已启用' : '超调抑制已禁用'}
+                    </div>
+                    <div style="font-size: 24px; font-weight: 700; color: ${overshootStatus.currentOvershoot > overshootStatus.threshold ? '#f44336' : '#4caf50'};">
+                        ${overshootStatus.currentOvershoot.toFixed(2)}%
+                    </div>
+                    <div style="font-size: 12px; color: #90a4ae; margin-top: 4px;">
+                        当前超调量
+                    </div>
+                    <div style="margin-top: 16px;">
+                        <div style="font-size: 12px; color: #90a4ae; margin-bottom: 4px;">
+                            阈值: ${overshootStatus.threshold}%
+                        </div>
+                        <div class="progress-bar ${overshootStatus.currentOvershoot > overshootStatus.threshold ? 'danger' : 'success'}">
+                            <div class="progress-fill" style="width: ${Math.min(100, (overshootStatus.currentOvershoot / overshootStatus.threshold) * 100)}%;"></div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.getElementById('overshoot-status').innerHTML = statusHtml;
+        }
+
+        function updateTable(data) {
+            const { layers, currentInjection, targetInjection } = data;
+            const tbody = document.getElementById('profile-table-body');
+            
+            tbody.innerHTML = layers.map((layer, index) => {
+                const current = currentInjection[index];
+                const target = targetInjection[index];
+                const adjustment = target - current;
+                const adjustmentPercent = ((adjustment / current) * 100).toFixed(1);
+                const adjustmentClass = adjustment > 0 ? 'positive' : adjustment < 0 ? 'negative' : '';
+                const statusClass = Math.abs(adjustment) < 5 ? 'success' : Math.abs(adjustment) < 15 ? 'warning' : 'danger';
+                const statusText = Math.abs(adjustment) < 5 ? '稳定' : Math.abs(adjustment) < 15 ? '待调整' : '需调整';
+
+                return `
+                    <tr>
+                        <td><strong>${layer}</strong></td>
+                        <td style="color: #2196f3;">${current.toFixed(1)}</td>
+                        <td style="color: #4caf50;">${target.toFixed(1)}</td>
+                        <td class="${adjustmentClass}" style="font-weight: 600;">
+                            ${adjustment > 0 ? '+' : ''}${adjustment.toFixed(1)}
+                        </td>
+                        <td class="${adjustmentClass}" style="font-weight: 600;">
+                            ${adjustment > 0 ? '+' : ''}${adjustmentPercent}%
+                        </td>
+                        <td><span class="badge badge-${statusClass}">${statusText}</span></td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function updateGainValue(value) {
+            document.getElementById('gain-value').textContent = value;
+        }
+
+        function updateThresholdValue(value) {
+            document.getElementById('threshold-value').textContent = value + '%';
+        }
+
+        async function sendCommand() {
+            if (!currentData) {
+                alert('请先加载剖面数据');
+                return;
+            }
+
+            const wellId = document.getElementById('well-selector').value;
+            const gain = parseFloat(document.getElementById('smith-gain').value);
+            const threshold = parseFloat(document.getElementById('overshoot-threshold').value);
+
+            const btn = event.target;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<span class="loading"></span> 下发中...';
+            btn.disabled = true;
+
+            try {
+                const result = await ComponentUtils.postData('/injection-profile/adjust', {
+                    wellId: wellId,
+                    smithGain: gain,
+                    overshootThreshold: threshold
+                });
+                
+                addToHistory('下发配水指令', wellId, 'success');
+                alert('配水指令下发成功！');
+            } catch (error) {
+                console.error('Send command failed:', error);
+                addToHistory('下发配水指令', wellId, 'failed');
+                alert('指令下发失败，请稍后重试');
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            }
+        }
+
+        async function optimizeProfile() {
+            if (!currentData) {
+                alert('请先加载剖面数据');
+                return;
+            }
+
+            const wellId = document.getElementById('well-selector').value;
+            const btn = event.target;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<span class="loading"></span> 优化中...';
+            btn.disabled = true;
+
+            try {
+                const result = await ComponentUtils.postData('/injection-profile/adjust', {
+                    wellId: wellId,
+                    autoOptimize: true
+                });
+                
+                if (result && result.length > 0) {
+                    currentData.targetInjection = result.map(r => r.targetInjection || currentData.targetInjection[0]);
+                    updateCharts(currentData);
+                    updateStats(currentData);
+                    updateTable(currentData);
+                }
+                
+                addToHistory('自动优化', wellId, 'success');
+                alert('剖面优化完成！');
+            } catch (error) {
+                console.error('Optimize failed:', error);
+                addToHistory('自动优化', wellId, 'failed');
+                alert('优化失败，请稍后重试');
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            }
+        }
+
+        function addToHistory(action, wellId, status) {
+            const record = {
+                time: new Date().toLocaleString('zh-CN'),
+                action: action,
+                wellId: wellId,
+                status: status
+            };
+            commandHistory.unshift(record);
+            if (commandHistory.length > 10) {
+                commandHistory.pop();
+            }
+            updateHistoryUI();
+        }
+
+        function updateHistoryUI() {
+            const container = document.getElementById('command-history');
+            if (commandHistory.length === 0) {
+                container.innerHTML = '<div class="no-data">暂无执行记录</div>';
+                return;
+            }
+
+            container.innerHTML = commandHistory.map(record => `
+                <div style="padding: 8px; margin-bottom: 8px; background: rgba(30, 58, 95, 0.3); border-radius: 4px; border-left: 3px solid ${record.status === 'success' ? '#4caf50' : '#f44336'};">
+                    <div style="font-size: 12px; font-weight: 600; color: ${record.status === 'success' ? '#4caf50' : '#f44336'};">
+                        ${record.action} - ${record.wellId}
+                    </div>
+                    <div style="font-size: 10px; color: #78909c; margin-top: 2px;">
+                        ${record.time}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>

@@ -1,0 +1,90 @@
+spring:
+  application:
+    name: smart-oilfield-reservoir-simulation
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/smart_oilfield}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:20}
+      minimum-idle: ${DB_POOL_MIN:5}
+      idle-timeout: 300000
+      connection-timeout: 30000
+      max-lifetime: 1800000
+      pool-name: ReservoirSimulationHikariPool
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.spatial.dialect.postgis.PostgisPG10Dialect
+        format_sql: true
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+
+server:
+  port: 8085
+  servlet:
+    context-path: /api
+
+simulation:
+  max-grid-count: ${SIM_MAX_GRID:1000000}
+  default-timeout-minutes: ${SIM_TIMEOUT:60}
+  cache-expire-hours: ${SIM_CACHE_HOURS:24}
+  max-parallel-simulations: ${SIM_MAX_PARALLEL:4}
+  default-max-iterations: 50
+  default-convergence-tolerance: 1.0e-6
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      simulationService:
+        register-health-indicator: true
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        event-consumer-buffer-size: 10
+  ratelimiter:
+    instances:
+      simulationService:
+        register-health-indicator: true
+        limit-for-period: 10
+        limit-refresh-period: 1s
+        timeout-duration: 500ms
+  bulkhead:
+    instances:
+      simulationService:
+        max-concurrent-calls: 4
+        max-wait-duration: 0ms
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,circuitbreakers,ratelimiters
+  endpoint:
+    health:
+      show-details: always
+  health:
+    circuitbreakers:
+      enabled: true
+
+logging:
+  level:
+    com.smart.oilfield.reservoir: INFO
+    io.github.resilience4j: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+async:
+  core-pool-size: 4
+  max-pool-size: 8
+  queue-capacity: 100
+  thread-name-prefix: "simulation-"

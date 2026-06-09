@@ -1,0 +1,80 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: smart-oilfield-gateway
+  cloud:
+    gateway:
+      discovery:
+        locator:
+          enabled: false
+      routes:
+        - id: connectivity-service
+          uri: http://localhost:8081
+          predicates:
+            - Path=/api/connectivity/**
+          filters:
+            - StripPrefix=1
+
+        - id: profile-service
+          uri: http://localhost:8082
+          predicates:
+            - Path=/api/profile/**
+          filters:
+            - StripPrefix=1
+
+        - id: eor-service
+          uri: http://localhost:8083
+          predicates:
+            - Path=/api/eor/**
+          filters:
+            - StripPrefix=1
+
+        - id: pump-diagnoser-service
+          uri: http://localhost:8084
+          predicates:
+            - Path=/api/fault-prediction/**,/api/alarms/**,/api/onnx/**
+          filters:
+            - StripPrefix=1
+
+        - id: simulation-service
+          uri: http://localhost:8085
+          predicates:
+            - Path=/api/simulation/**
+          filters:
+            - StripPrefix=1
+
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowed-origin-patterns: "*"
+            allowed-methods: "*"
+            allowed-headers: "*"
+            allow-credentials: true
+            max-age: 3600
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,gateway,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+    gateway:
+      enabled: true
+
+logging:
+  level:
+    org.springframework.cloud.gateway: INFO
+    com.smart.oilfield.gateway: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+gateway:
+  rate-limit:
+    enabled: true
+    default-permits-per-second: 100
+    burst-capacity: 200
+    timeout-seconds: 1

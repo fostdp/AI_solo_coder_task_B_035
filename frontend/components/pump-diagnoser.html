@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>抽油机故障诊断 - 智慧油田注水开发动态调控系统</title>
+    <link rel="stylesheet" href="../css/components.css" />
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <script src="../js/config.js"></script>
+    <script src="../js/components.js"></script>
+</head>
+<body>
+    <div class="component-page">
+        <header class="component-header">
+            <a href="../index.html" class="back-btn">← 返回首页</a>
+            <h1>⚙️ 抽油机故障诊断</h1>
+            <div class="header-info">
+                <span id="current-time">--</span>
+                <span class="status-indicator online">在线</span>
+            </div>
+        </header>
+
+        <div class="component-content">
+            <aside class="component-sidebar">
+                <div class="panel-section">
+                    <h3>采油井选择</h3>
+                    <select id="well-selector" class="form-control">
+                        <option value="">请选择采油井</option>
+                    </select>
+                    <button class="btn btn-primary" style="width: 100%;" onclick="runDiagnosis()">
+                        🔍 故障诊断
+                    </button>
+                </div>
+
+                <div class="panel-section">
+                    <h3>实时刷新</h3>
+                    <label class="checkbox-item">
+                        <input type="checkbox" id="auto-refresh" checked>
+                        <span>自动刷新数据</span>
+                    </label>
+                    <select id="refresh-interval" class="form-control" style="margin-top: 8px;">
+                        <option value="5000">5秒</option>
+                        <option value="10000" selected>10秒</option>
+                        <option value="30000">30秒</option>
+                        <option value="60000">60秒</option>
+                    </select>
+                </div>
+
+                <div class="panel-section">
+                    <h3>ONNX模型状态</h3>
+                    <div id="onnx-status">
+                        <div class="no-data">请先运行诊断</div>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h3>操作</h3>
+                    <button class="btn btn-success" style="width: 100%; margin-bottom: 10px;" onclick="acknowledgeAll()">
+                        ✅ 全部确认
+                    </button>
+                    <button class="btn btn-warning" style="width: 100%; margin-bottom: 10px;" onclick="exportDiagnosis()">
+                        📑 导出诊断报告
+                    </button>
+                    <button class="btn btn-danger" style="width: 100%;" onclick="runInference()">
+                        ⚡ ONNX性能测试
+                    </button>
+                </div>
+
+                <div class="panel-section">
+                    <h3>故障类型说明</h3>
+                    <div style="font-size: 12px; color: #90a4ae; line-height: 1.6;">
+                        <p><span style="color: #f44336;">●</span> <strong>杆断:</strong> 抽油杆断裂</p>
+                        <p><span style="color: #ff9800;">●</span> <strong>泵漏:</strong> 泵筒漏失</p>
+                        <p><span style="color: #ffc107;">●</span> <strong>气锁:</strong> 气体影响泵效</p>
+                        <p><span style="color: #9c27b0;">●</span> <strong>阀漏:</strong> 凡尔漏失</p>
+                    </div>
+                </div>
+            </aside>
+
+            <main class="component-main">
+                <div class="info-cards">
+                    <div class="info-card primary">
+                        <div class="label">诊断井号</div>
+                        <div class="value" id="current-well">--</div>
+                        <div class="unit"></div>
+                    </div>
+                    <div class="info-card success">
+                        <div class="label">模型加载状态</div>
+                        <div class="value" id="model-status">--</div>
+                        <div class="unit"></div>
+                    </div>
+                    <div class="info-card warning">
+                        <div class="label">平均推理时间</div>
+                        <div class="value" id="avg-inference-time">--</div>
+                        <div class="unit">ms</div>
+                    </div>
+                    <div class="info-card danger">
+                        <div class="label">未确认告警</div>
+                        <div class="value" id="unacknowledged-count">--</div>
+                        <div class="unit">条</div>
+                    </div>
+                </div>
+
+                <div class="charts-grid-3" style="margin-bottom: 16px;">
+                    <div class="chart-card">
+                        <h4>杆断概率</h4>
+                        <div class="chart-container" id="gauge-rod-break"></div>
+                    </div>
+                    <div class="chart-card">
+                        <h4>泵漏概率</h4>
+                        <div class="chart-container" id="gauge-pump-leak"></div>
+                    </div>
+                    <div class="chart-card">
+                        <h4>气锁概率</h4>
+                        <div class="chart-container" id="gauge-gas-lock"></div>
+                    </div>
+                </div>
+
+                <div class="charts-grid">
+                    <div class="chart-card">
+                        <h4>阀漏概率</h4>
+                        <div class="chart-container" id="gauge-valve-leak"></div>
+                    </div>
+                    <div class="chart-card">
+                        <h4>ONNX推理性能指标</h4>
+                        <div id="performance-container" style="height: 250px; overflow-y: auto;">
+                            <div class="no-data">请点击"ONNX性能测试"按钮</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="chart-card" style="min-height: 300px;">
+                    <h4>工况自适应阈值</h4>
+                    <div id="thresholds-container">
+                        <div class="no-data">请先运行故障诊断</div>
+                    </div>
+                </div>
+
+                <div class="chart-card" style="min-height: 300px;">
+                    <h4>迁移学习知识来源</h4>
+                    <div id="knowledge-container">
+                        <div class="no-data">请先运行故障诊断</div>
+                    </div>
+                </div>
+
+                <div class="chart-card" style="min-height: 400px;">
+                    <h4>告警列表 <span class="badge badge-danger" id="alarm-badge">0</span></h4>
+                    <div class="alarm-list" id="alarm-list">
+                        <div class="no-data">暂无告警</div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script>
+        let gauges = {};
+        let currentData = null;
+        let refreshTimer = null;
+
+        async function init() {
+            await loadWells();
+            initGauges();
+            startAutoRefresh();
+        }
+
+        async function loadWells() {
+            try {
+                const wells = await ComponentUtils.fetchData('/wells?wellType=PRODUCTION');
+                const selector = document.getElementById('well-selector');
+                selector.innerHTML = '<option value="">请选择采油井</option>';
+                wells.forEach(well => {
+                    const option = document.createElement('option');
+                    option.value = well.wellId;
+                    option.textContent = well.wellName;
+                    selector.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Failed to load wells:', error);
+                const mockWells = ['P1', 'P2', 'P3', 'P4', 'P5'];
+                const selector = document.getElementById('well-selector');
+                selector.innerHTML = '<option value="">请选择采油井</option>';
+                mockWells.forEach(wellId => {
+                    const option = document.createElement('option');
+                    option.value = wellId;
+                    option.textContent = wellId;
+                    selector.appendChild(option);
+                });
+            }
+        }
+
+        function initGauges() {
+            const faultTypes = ['ROD_BREAK', 'PUMP_LEAK', 'GAS_LOCK', 'VALVE_LEAK'];
+            const domIds = ['gauge-rod-break', 'gauge-pump-leak', 'gauge-gas-lock', 'gauge-valve-leak'];
+            
+            faultTypes.forEach((type, index) => {
+                const option = ComponentUtils.createGaugeOption(
+                    ComponentUtils.getFaultTypeText(type),
+                    0,
+                    100,
+                    '%'
+                );
+                gauges[type] = echarts.init(document.getElementById(domIds[index]), 'dark');
+                gauges[type].setOption(option);
+            });
+
+            window.addEventListener('resize', () => {
+                Object.values(gauges).forEach(gauge => gauge.resize());
+            });
+        }
+
+        async function runDiagnosis() {
+            const wellId = document.getElementById('well-selector').value;
+            if (!wellId) {
+                alert('请先选择采油井');
+                return;
+            }
+
+            const btn = event.target;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<span class="loading"></span> 诊断中...';
+            btn.disabled = true;
+
+            try {
+                let data;
+                try {
+                    const [faultData, onnxData, alarmData] = await Promise.all([
+                        ComponentUtils.fetchData(`/fault-prediction/well/${wellId}/summary`),
+                        ComponentUtils.fetchData('/fault-prediction/onnx-performance'),
+                        ComponentUtils.fetchData('/alarms/unacknowledged')
+                    ]);
+                    data = {
+                        ...faultData,
+                        onnxPerformance: onnxData,
+                        alarms: alarmData.alarms || alarmData
+                    };
+                } catch (e) {
+                    console.log('Using mock data');
+                    data = ComponentUtils.getMockFaultData();
+                }
+                
+                currentData = data;
+                updateGauges(data.faultProbabilities);
+                updateStats(data);
+                updateOnnxStatus(data.onnxPerformance);
+                updateThresholds(data.thresholds);
+                updateKnowledgeSources(data.knowledgeSources);
+                updateAlarms(data.alarms);
+                
+                document.getElementById('current-well').textContent = wellId;
+            } catch (error) {
+                console.error('Diagnosis failed:', error);
+                alert('诊断失败，请稍后重试');
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            }
+        }
+
+        function updateGauges(probabilities) {
+            Object.keys(probabilities).forEach(type => {
+                if (gauges[type]) {
+                    const value = Math.round(probabilities[type] * 100);
+                    const option = ComponentUtils.createGaugeOption(
+                        ComponentUtils.getFaultTypeText(type),
+                        value,
+                        100,
+                        '%'
+                    );
+                    gauges[type].setOption(option);
+                }
+            });
+        }
+
+        function updateStats(data) {
+            const { onnxPerformance, alarms } = data;
+            
+            document.getElementById('model-status').textContent = onnxPerformance.modelLoaded ? '已加载' : '未加载';
+            document.getElementById('model-status').style.color = onnxPerformance.modelLoaded ? '#4caf50' : '#f44336';
+            document.getElementById('avg-inference-time').textContent = onnxPerformance.averageInferenceTimeMs.toFixed(2);
+            document.getElementById('unacknowledged-count').textContent = alarms ? alarms.length : 0;
+        }
+
+        function updateOnnxStatus(performance) {
+            const statusHtml = `
+                <div style="text-align: center; padding: 16px;">
+                    <div class="status-indicator ${performance.modelLoaded ? 'online' : 'offline'}" style="margin-bottom: 16px;">
+                        ${performance.modelLoaded ? '模型已加载' : '模型未加载'}
+                    </div>
+                    <div style="font-size: 12px; color: #90a4ae; line-height: 1.8; text-align: left;">
+                        <div style="display: flex; justify-content: space-between;">
+                            <span>执行提供者:</span>
+                            <span style="color: #4fc3f7;">${performance.executionProvider}</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span>线程数:</span>
+                            <span style="color: #4fc3f7;">${performance.numThreads}</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span>总推理次数:</span>
+                            <span style="color: #4fc3f7;">${performance.totalInferenceCount.toLocaleString()}</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span>总耗时:</span>
+                            <span style="color: #4fc3f7;">${performance.totalInferenceTimeMs.toFixed(0)}ms</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.getElementById('onnx-status').innerHTML = statusHtml;
+        }
+
+        function updateThresholds(thresholds) {
+            const container = document.getElementById('thresholds-container');
+            
+            const html = `
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+                    ${Object.entries(thresholds).map(([type, value]) => {
+                        const currentProb = currentData && currentData.faultProbabilities ? currentData.faultProbabilities[type] : 0;
+                        const exceeds = currentProb > value;
+                        return `
+                            <div style="background: rgba(30, 58, 95, 0.3); padding: 16px; border-radius: 8px; border: 1px solid ${exceeds ? '#f44336' : '#1e3a5f'};">
+                                <div style="font-size: 13px; color: #90a4ae; margin-bottom: 8px;">
+                                    ${ComponentUtils.getFaultTypeText(type)}
+                                </div>
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                    <span style="font-size: 20px; font-weight: 700; color: ${exceeds ? '#f44336' : '#4fc3f7'};">
+                                        ${(currentProb * 100).toFixed(1)}%
+                                    </span>
+                                    <span class="badge ${exceeds ? 'badge-danger' : 'badge-info'}">
+                                        阈值: ${(value * 100).toFixed(0)}%
+                                    </span>
+                                </div>
+                                <div class="progress-bar ${exceeds ? 'danger' : 'success'}">
+                                    <div class="progress-fill" style="width: ${Math.min(100, (currentProb / value) * 100)}%;"></div>
+                                </div>
+                                ${exceeds ? '<div style="font-size: 11px; color: #f44336; margin-top: 4px;">⚠️ 已超过阈值</div>' : ''}
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            `;
+            container.innerHTML = html;
+        }
+
+        function updateKnowledgeSources(sources) {
+            const container = document.getElementById('knowledge-container');
+            
+            const html = `
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>井号</th>
+                            <th>知识来源</th>
+                            <th>置信度</th>
+                            <th>状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${sources.map(source => `
+                            <tr>
+                                <td><strong style="color: #f44336;">${source.well}</strong></td>
+                                <td>
+                                    ${source.source}
+                                    ${source.source.includes('迁移') ? '<span class="knowledge-tag">迁移学习</span>' : 
+                                      source.source.includes('领域') ? '<span class="knowledge-tag">领域知识</span>' :
+                                      '<span class="knowledge-tag">模型训练</span>'}
+                                </td>
+                                <td style="font-weight: 600; color: ${source.confidence >= 0.9 ? '#4caf50' : source.confidence >= 0.7 ? '#ff9800' : '#f44336'};">
+                                    ${(source.confidence * 100).toFixed(1)}%
+                                </td>
+                                <td>
+                                    <span class="badge ${source.confidence >= 0.9 ? 'badge-success' : source.confidence >= 0.7 ? 'badge-warning' : 'badge-danger'}">
+                                        ${source.confidence >= 0.9 ? '高置信' : source.confidence >= 0.7 ? '中置信' : '低置信'}
+                                    </span>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+            container.innerHTML = html;
+        }
+
+        function updateAlarms(alarms) {
+            const container = document.getElementById('alarm-list');
+            const badge = document.getElementById('alarm-badge');
+            
+            if (!alarms || alarms.length === 0) {
+                container.innerHTML = '<div class="no-data">暂无告警</div>';
+                badge.textContent = '0';
+                return;
+            }
+
+            badge.textContent = alarms.length;
+            
+            container.innerHTML = alarms.map(alarm => {
+                const level = alarm.level || alarm.alarmLevel;
+                const type = alarm.type || alarm.alarmType;
+                const message = alarm.message || alarm.alarmMessage;
+                const time = alarm.time || alarm.alarmTime;
+                
+                return `
+                    <div class="alarm-item level-${level === 'LEVEL_2' || level === 2 ? '2' : '1'}">
+                        <div class="alarm-type">
+                            ${ComponentUtils.getFaultTypeText(type) || ComponentUtils.getAlarmLevelText(level)}
+                            ${alarm.well ? ` - ${alarm.well}` : ''}
+                        </div>
+                        <div class="alarm-message">${message}</div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
+                            <div class="alarm-time">${ComponentUtils.formatDateTime(time)}</div>
+                            <button class="btn btn-primary" style="padding: 4px 12px; font-size: 11px;" onclick="acknowledgeAlarm('${alarm.id}')">
+                                确认
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function runInference() {
+            const btn = event.target;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<span class="loading"></span> 测试中...';
+            btn.disabled = true;
+
+            try {
+                let performance;
+                try {
+                    performance = await ComponentUtils.fetchData('/fault-prediction/onnx-performance');
+                } catch (e) {
+                    console.log('Using mock performance data');
+                    performance = ComponentUtils.getMockFaultData().onnxPerformance;
+                }
+
+                const container = document.getElementById('performance-container');
+                const html = `
+                    <div style="padding: 16px;">
+                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 16px;">
+                            <div style="background: rgba(79, 195, 247, 0.1); padding: 12px; border-radius: 6px; border-left: 3px solid #4fc3f7;">
+                                <div style="font-size: 11px; color: #90a4ae;">总推理次数</div>
+                                <div style="font-size: 24px; font-weight: 700; color: #4fc3f7;">${performance.totalInferenceCount.toLocaleString()}</div>
+                            </div>
+                            <div style="background: rgba(76, 175, 80, 0.1); padding: 12px; border-radius: 6px; border-left: 3px solid #4caf50;">
+                                <div style="font-size: 11px; color: #90a4ae;">平均推理时间</div>
+                                <div style="font-size: 24px; font-weight: 700; color: #4caf50;">${performance.averageInferenceTimeMs.toFixed(2)} ms</div>
+                            </div>
+                            <div style="background: rgba(255, 152, 0, 0.1); padding: 12px; border-radius: 6px; border-left: 3px solid #ff9800;">
+                                <div style="font-size: 11px; color: #90a4ae;">总耗时</div>
+                                <div style="font-size: 24px; font-weight: 700; color: #ff9800;">${performance.totalInferenceTimeMs.toFixed(0)} ms</div>
+                            </div>
+                            <div style="background: rgba(156, 39, 176, 0.1); padding: 12px; border-radius: 6px; border-left: 3px solid #9c27b0;">
+                                <div style="font-size: 11px; color: #90a4ae;">执行提供者</div>
+                                <div style="font-size: 18px; font-weight: 700; color: #9c27b0;">${performance.executionProvider}</div>
+                            </div>
+                        </div>
+                        <div style="font-size: 12px; color: #90a4ae; line-height: 1.8;">
+                            <div style="display: flex; justify-content: space-between;">
+                                <span>模型路径:</span>
+                                <span style="color: #e0e6ed; font-family: monospace;">${performance.modelPath}</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span>线程数:</span>
+                                <span style="color: #e0e6ed;">${performance.numThreads}</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span>输入特征数:</span>
+                                <span style="color: #e0e6ed;">${performance.inputFeatureCount || 8}</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span>输出类别数:</span>
+                                <span style="color: #e0e6ed;">${performance.outputClassCount || 4}</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                container.innerHTML = html;
+
+                alert('ONNX性能测试完成！');
+            } catch (error) {
+                console.error('Inference test failed:', error);
+                alert('性能测试失败，请稍后重试');
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            }
+        }
+
+        async function acknowledgeAlarm(alarmId) {
+            try {
+                await ComponentUtils.postData(`/alarms/${alarmId}/acknowledge`, {});
+                alert('告警已确认');
+                if (currentData && currentData.alarms) {
+                    currentData.alarms = currentData.alarms.filter(a => a.id != alarmId);
+                    updateAlarms(currentData.alarms);
+                }
+            } catch (error) {
+                console.error('Failed to acknowledge alarm:', error);
+                alert('确认失败，请稍后重试');
+            }
+        }
+
+        async function acknowledgeAll() {
+            if (!currentData || !currentData.alarms || currentData.alarms.length === 0) {
+                alert('没有需要确认的告警');
+                return;
+            }
+
+            if (!confirm('确定要确认所有告警吗？')) return;
+
+            try {
+                for (const alarm of currentData.alarms) {
+                    await ComponentUtils.postData(`/alarms/${alarm.id}/acknowledge`, {});
+                }
+                currentData.alarms = [];
+                updateAlarms([]);
+                alert('所有告警已确认');
+            } catch (error) {
+                console.error('Failed to acknowledge all:', error);
+                alert('操作失败，请稍后重试');
+            }
+        }
+
+        function exportDiagnosis() {
+            if (!currentData) {
+                alert('请先运行故障诊断');
+                return;
+            }
+
+            const wellId = document.getElementById('well-selector').value;
+            const { faultProbabilities, onnxPerformance, alarms } = currentData;
+            
+            let report = `# 抽油机故障诊断报告\n\n`;
+            report += `井号: ${wellId}\n`;
+            report += `诊断时间: ${new Date().toLocaleString('zh-CN')}\n\n`;
+            report += `## 故障概率\n\n`;
+            
+            Object.entries(faultProbabilities).forEach(([type, prob]) => {
+                report += `- ${ComponentUtils.getFaultTypeText(type)}: ${(prob * 100).toFixed(2)}%\n`;
+            });
+
+            report += `\n## ONNX推理性能\n\n`;
+            report += `- 模型状态: ${onnxPerformance.modelLoaded ? '已加载' : '未加载'}\n`;
+            report += `- 执行提供者: ${onnxPerformance.executionProvider}\n`;
+            report += `- 平均推理时间: ${onnxPerformance.averageInferenceTimeMs.toFixed(2)}ms\n`;
+            report += `- 总推理次数: ${onnxPerformance.totalInferenceCount.toLocaleString()}\n`;
+
+            if (alarms && alarms.length > 0) {
+                report += `\n## 未确认告警 (${alarms.length}条)\n\n`;
+                alarms.forEach(alarm => {
+                    report += `- [${alarm.level || alarm.alarmLevel}] ${alarm.message || alarm.alarmMessage}\n`;
+                });
+            }
+
+            const blob = new Blob([report], { type: 'text/markdown;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `故障诊断报告_${wellId}_${new Date().toISOString().split('T')[0]}.md`;
+            a.click();
+            URL.revokeObjectURL(url);
+
+            alert('诊断报告导出成功！');
+        }
+
+        function startAutoRefresh() {
+            const autoRefreshEl = document.getElementById('auto-refresh');
+            const intervalEl = document.getElementById('refresh-interval');
+
+            function setupTimer() {
+                if (refreshTimer) {
+                    clearInterval(refreshTimer);
+                }
+                if (autoRefreshEl.checked && currentData) {
+                    const interval = parseInt(intervalEl.value);
+                    refreshTimer = setInterval(() => {
+                        if (document.getElementById('well-selector').value) {
+                            runDiagnosis();
+                        }
+                    }, interval);
+                }
+            }
+
+            autoRefreshEl.addEventListener('change', setupTimer);
+            intervalEl.addEventListener('change', setupTimer);
+        }
+
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>

@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>连通性分析 - 智慧油田注水开发动态调控系统</title>
+    <link rel="stylesheet" href="../css/components.css" />
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <script src="../js/config.js"></script>
+    <script src="../js/components.js"></script>
+</head>
+<body>
+    <div class="component-page">
+        <header class="component-header">
+            <a href="../index.html" class="back-btn">← 返回首页</a>
+            <h1>🔗 连通性分析</h1>
+            <div class="header-info">
+                <span id="current-time">--</span>
+                <span class="status-indicator online">在线</span>
+            </div>
+        </header>
+
+        <div class="component-content">
+            <aside class="component-sidebar">
+                <div class="panel-section">
+                    <h3>区块选择</h3>
+                    <select id="block-selector" class="form-control">
+                        <option value="ALL">全部区块</option>
+                    </select>
+                    <button class="btn btn-primary" style="width: 100%;" onclick="analyzeConnectivity()">
+                        🔍 开始分析
+                    </button>
+                </div>
+
+                <div class="panel-section">
+                    <h3>显示设置</h3>
+                    <label class="checkbox-item">
+                        <input type="checkbox" id="show-pseudo-edges" checked onchange="togglePseudoEdges()">
+                        <span>显示伪边</span>
+                    </label>
+                    <label class="checkbox-item">
+                        <input type="checkbox" id="show-coefficients" checked onchange="toggleCoefficients()">
+                        <span>显示相关系数</span>
+                    </label>
+                </div>
+
+                <div class="panel-section">
+                    <h3>连通性图例</h3>
+                    <div class="legend-items">
+                        <div class="legend-item">
+                            <span class="legend-circle" style="background: #2196f3;"></span>
+                            <span>注水井</span>
+                        </div>
+                        <div class="legend-item">
+                            <span class="legend-circle" style="background: #f44336;"></span>
+                            <span>采油井</span>
+                        </div>
+                        <div class="legend-item">
+                            <span class="legend-line" style="background: #00FF00;"></span>
+                            <span>强连通 (≥0.7)</span>
+                        </div>
+                        <div class="legend-item">
+                            <span class="legend-line" style="background: #FFFF00;"></span>
+                            <span>中等连通 (0.4-0.7)</span>
+                        </div>
+                        <div class="legend-item">
+                            <span class="legend-line" style="background: #FF0000;"></span>
+                            <span>弱连通 (<0.4)</span>
+                        </div>
+                        <div class="legend-item">
+                            <span class="legend-line" style="background: #9c27b0; border: 1px dashed #9c27b0;"></span>
+                            <span>伪边</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h3>分析统计</h3>
+                    <div id="stats-container">
+                        <div class="no-data">请先运行分析</div>
+                    </div>
+                </div>
+            </aside>
+
+            <main class="component-main">
+                <div class="info-cards">
+                    <div class="info-card primary">
+                        <div class="label">井对总数</div>
+                        <div class="value" id="total-pairs">--</div>
+                        <div class="unit">对</div>
+                    </div>
+                    <div class="info-card success">
+                        <div class="label">强连通</div>
+                        <div class="value" id="high-connectivity">--</div>
+                        <div class="unit">对</div>
+                        <div class="change positive" id="high-percent">--</div>
+                    </div>
+                    <div class="info-card warning">
+                        <div class="label">中等连通</div>
+                        <div class="value" id="medium-connectivity">--</div>
+                        <div class="unit">对</div>
+                        <div class="change" id="medium-percent">--</div>
+                    </div>
+                    <div class="info-card danger">
+                        <div class="label">伪边数量</div>
+                        <div class="value" id="pseudo-edges">--</div>
+                        <div class="unit">条</div>
+                    </div>
+                </div>
+
+                <div class="charts-grid">
+                    <div class="chart-card">
+                        <h4>井对关联力导向图</h4>
+                        <div class="chart-container" id="connectivity-graph"></div>
+                    </div>
+                    <div class="chart-card">
+                        <h4>偏相关系数分布</h4>
+                        <div class="chart-container" id="coefficient-chart"></div>
+                    </div>
+                </div>
+
+                <div class="chart-card" style="min-height: 400px;">
+                    <h4>连通性详情列表</h4>
+                    <div style="overflow-x: auto;">
+                        <table class="data-table" id="connectivity-table">
+                            <thead>
+                                <tr>
+                                    <th>注水井</th>
+                                    <th>采油井</th>
+                                    <th>相关系数</th>
+                                    <th>连通等级</th>
+                                    <th>伪边标记</th>
+                                    <th>分析时间</th>
+                                </tr>
+                            </thead>
+                            <tbody id="connectivity-table-body">
+                                <tr>
+                                    <td colspan="6" style="text-align: center; padding: 40px; color: #546e7a;">
+                                        请先运行连通性分析
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script>
+        let connectivityChart = null;
+        let coefficientChart = null;
+        let currentData = null;
+        let showPseudoEdges = true;
+        let showCoefficients = true;
+
+        async function init() {
+            await ComponentUtils.loadBlocks('block-selector');
+            initCharts();
+        }
+
+        function initCharts() {
+            connectivityChart = echarts.init(document.getElementById('connectivity-graph'), 'dark');
+            coefficientChart = echarts.init(document.getElementById('coefficient-chart'), 'dark');
+
+            window.addEventListener('resize', () => {
+                connectivityChart.resize();
+                coefficientChart.resize();
+            });
+        }
+
+        async function analyzeConnectivity() {
+            const blockName = document.getElementById('block-selector').value;
+            const btn = event.target;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<span class="loading"></span> 分析中...';
+            btn.disabled = true;
+
+            try {
+                let data;
+                try {
+                    data = await ComponentUtils.postData('/connectivity/analyze', {
+                        blockName: blockName
+                    });
+                } catch (e) {
+                    console.log('Using mock data');
+                    data = ComponentUtils.getMockConnectivityData();
+                }
+                
+                currentData = data;
+                updateCharts(data);
+                updateStats(data);
+                updateTable(data);
+            } catch (error) {
+                console.error('Analysis failed:', error);
+                alert('分析失败，请稍后重试');
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            }
+        }
+
+        function updateCharts(data) {
+            const { nodes, links } = data;
+
+            const graphData = {
+                nodes: nodes.map(n => ({
+                    ...n,
+                    itemStyle: {
+                        color: n.category === 0 ? '#2196f3' : '#f44336'
+                    },
+                    label: {
+                        show: true,
+                        color: '#fff',
+                        fontSize: 12
+                    }
+                })),
+                links: links.map(l => {
+                    const color = l.isPseudo ? '#9c27b0' : ComponentUtils.getConnectivityColor(l.value);
+                    return {
+                        ...l,
+                        lineStyle: {
+                            color: color,
+                            width: Math.max(1, l.value * 5),
+                            type: l.isPseudo ? 'dashed' : 'solid',
+                            opacity: showPseudoEdges || !l.isPseudo ? 1 : 0
+                        },
+                        label: {
+                            show: showCoefficients,
+                            formatter: l.value.toFixed(2),
+                            color: '#fff',
+                            fontSize: 10
+                        }
+                    };
+                }),
+                categories: [
+                    { name: '注水井' },
+                    { name: '采油井' }
+                ]
+            };
+
+            const graphOption = {
+                tooltip: {
+                    formatter: function(params) {
+                        if (params.dataType === 'node') {
+                            return `<strong>${params.name}</strong><br/>类型: ${params.data.category === 0 ? '注水井' : '采油井'}`;
+                        } else if (params.dataType === 'edge') {
+                            return `${params.data.source} → ${params.data.target}<br/>相关系数: ${params.data.value.toFixed(4)}${params.data.isPseudo ? '<br/><span style="color:#9c27b0">伪边</span>' : ''}`;
+                        }
+                    }
+                },
+                legend: [{
+                    data: ['注水井', '采油井'],
+                    textStyle: { color: '#90a4ae' },
+                    top: 10
+                }],
+                series: [{
+                    type: 'graph',
+                    layout: 'force',
+                    data: graphData.nodes,
+                    links: graphData.links,
+                    categories: graphData.categories,
+                    roam: true,
+                    label: {
+                        position: 'right',
+                        formatter: '{b}'
+                    },
+                    lineStyle: {
+                        curveness: 0.2
+                    },
+                    force: {
+                        repulsion: 800,
+                        edgeLength: [80, 200],
+                        gravity: 0.1
+                    },
+                    emphasis: {
+                        focus: 'adjacency',
+                        lineStyle: {
+                            width: 8
+                        }
+                    }
+                }]
+            };
+
+            connectivityChart.setOption(graphOption);
+
+            const coefficientData = links.map(l => l.value).sort((a, b) => b - a);
+            const barOption = ComponentUtils.createBarOption(
+                '偏相关系数',
+                links.map(l => `${l.source}-${l.target}`),
+                [{ name: '相关系数', data: coefficientData }],
+                links.map(l => l.isPseudo ? '#9c27b0' : ComponentUtils.getConnectivityColor(l.value))
+            );
+            barOption.tooltip.formatter = function(params) {
+                const link = links[params.dataIndex];
+                return `${link.source} → ${link.target}<br/>相关系数: ${params.value.toFixed(4)}${link.isPseudo ? '<br/><span style="color:#9c27b0">伪边</span>' : ''}`;
+            };
+            barOption.yAxis.max = 1;
+            
+            coefficientChart.setOption(barOption);
+        }
+
+        function updateStats(data) {
+            const { links } = data;
+            const total = links.length;
+            const high = links.filter(l => l.value >= 0.7 && !l.isPseudo).length;
+            const medium = links.filter(l => l.value >= 0.4 && l.value < 0.7 && !l.isPseudo).length;
+            const pseudo = links.filter(l => l.isPseudo).length;
+
+            document.getElementById('total-pairs').textContent = total;
+            document.getElementById('high-connectivity').textContent = high;
+            document.getElementById('medium-connectivity').textContent = medium;
+            document.getElementById('pseudo-edges').textContent = pseudo;
+            document.getElementById('high-percent').textContent = `占比 ${((high / total) * 100).toFixed(1)}%`;
+            document.getElementById('medium-percent').textContent = `占比 ${((medium / total) * 100).toFixed(1)}%`;
+
+            const statsHtml = `
+                <div style="font-size: 12px; line-height: 1.8;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="color: #90a4ae;">平均相关系数</span>
+                        <span style="color: #4fc3f7; font-weight: 600;">
+                            ${(links.reduce((s, l) => s + l.value, 0) / total).toFixed(4)}
+                        </span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="color: #90a4ae;">最大相关系数</span>
+                        <span style="color: #4caf50; font-weight: 600;">
+                            ${Math.max(...links.map(l => l.value)).toFixed(4)}
+                        </span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="color: #90a4ae;">最小相关系数</span>
+                        <span style="color: #f44336; font-weight: 600;">
+                            ${Math.min(...links.map(l => l.value)).toFixed(4)}
+                        </span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <span style="color: #90a4ae;">伪边占比</span>
+                        <span style="color: #9c27b0; font-weight: 600;">
+                            ${((pseudo / total) * 100).toFixed(1)}%
+                        </span>
+                    </div>
+                </div>
+            `;
+            document.getElementById('stats-container').innerHTML = statsHtml;
+        }
+
+        function updateTable(data) {
+            const { links } = data;
+            const tbody = document.getElementById('connectivity-table-body');
+            
+            tbody.innerHTML = links.map(link => {
+                const level = ComponentUtils.getConnectivityLevel(link.value);
+                return `
+                    <tr>
+                        <td><span style="color: #2196f3;">${link.source}</span></td>
+                        <td><span style="color: #f44336;">${link.target}</span></td>
+                        <td style="font-weight: 600; color: ${ComponentUtils.getConnectivityColor(link.value)};">
+                            ${link.value.toFixed(4)}
+                        </td>
+                        <td><span class="badge badge-${level.class === 'high' ? 'success' : level.class === 'medium' ? 'warning' : 'danger'}">${level.text}</span></td>
+                        <td>${link.isPseudo ? '<span class="badge badge-danger">是</span>' : '<span class="badge badge-success">否</span>'}</td>
+                        <td style="color: #90a4ae; font-size: 12px;">${ComponentUtils.formatDateTime(new Date())}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function togglePseudoEdges() {
+            showPseudoEdges = document.getElementById('show-pseudo-edges').checked;
+            if (currentData) {
+                updateCharts(currentData);
+            }
+        }
+
+        function toggleCoefficients() {
+            showCoefficients = document.getElementById('show-coefficients').checked;
+            if (currentData) {
+                updateCharts(currentData);
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>

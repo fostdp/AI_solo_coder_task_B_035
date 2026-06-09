@@ -1,0 +1,80 @@
+spring:
+  application:
+    name: smart-oilfield-pump-diagnoser
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/smart_oilfield}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:20}
+      minimum-idle: ${DB_POOL_MIN:5}
+      idle-timeout: 300000
+      connection-timeout: 30000
+      max-lifetime: 1800000
+      pool-name: PumpDiagnoserHikariPool
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.spatial.dialect.postgis.PostgisPG10Dialect
+        format_sql: true
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+
+server:
+  port: 8084
+  servlet:
+    context-path: /api
+
+onnx:
+  model:
+    path: ${ONNX_MODEL_PATH:models/fault_detection_model.onnx}
+  num-threads: ${ONNX_NUM_THREADS:4}
+  execution-provider: ${ONNX_EXECUTION_PROVIDER:CPU}
+
+advanced:
+  fault:
+    default-analysis-window-hours: 72
+    min-analysis-window-hours: 24
+    fault-probability-threshold: 0.6
+    critical-fault-threshold: 0.8
+    warning-fault-threshold: 0.6
+    notice-fault-threshold: 0.4
+    rod-break-current-deviation-threshold: 2.0
+    pump-leak-fluid-level-rise-threshold: 50.0
+    gas-lock-current-drop-threshold: 0.3
+    valve-leak-efficiency-drop-threshold: 0.2
+    auto-prediction-hours-interval: 6
+    auto-prediction-schedule: "0 0 */6 * * ?"
+    prediction-lead-time-hours: 48
+    rod-break-maintenance-cost: 50000.0
+    pump-leak-maintenance-cost: 30000.0
+    gas-lock-maintenance-cost: 10000.0
+    valve-leak-maintenance-cost: 15000.0
+    rod-break-downtime-hours: 24
+    pump-leak-downtime-hours: 12
+    gas-lock-downtime-hours: 4
+    valve-leak-downtime-hours: 8
+    enable-auto-alarm: true
+    model-version: "v2.0-onnx"
+    enable-adaptive-threshold: true
+    enable-transfer-learning: true
+    adaptive-threshold-sensitivity: 0.5
+    working-condition-window-hours: 24
+    min-threshold-adjustment-factor: 0.8
+    max-threshold-adjustment-factor: 1.5
+    transfer-learning-weight: 0.3
+    historical-reference-days: 30
+    working-condition-stability-threshold: 0.3
+    false-positive-penalty-factor: 0.9
+
+logging:
+  level:
+    com.smart.oilfield.pump: INFO
+    ai.onnxruntime: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
