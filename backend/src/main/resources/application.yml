@@ -2,13 +2,13 @@ spring:
   application:
     name: smart-oilfield-backend
   datasource:
-    url: jdbc:postgresql://localhost:5432/smart_oilfield
-    username: postgres
-    password: postgres
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/smart_oilfield}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
     hikari:
-      maximum-pool-size: 50
-      minimum-idle: 10
+      maximum-pool-size: ${DB_POOL_SIZE:50}
+      minimum-idle: ${DB_POOL_MIN:10}
       idle-timeout: 300000
       connection-timeout: 30000
       max-lifetime: 1800000
@@ -35,11 +35,36 @@ server:
   servlet:
     context-path: /api
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,loggers,heapdump,threaddump
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: when-authorized
+      probes:
+        enabled: true
+    metrics:
+      export:
+        prometheus:
+          enabled: true
+          step: 30s
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    enable:
+      all: true
+    export:
+      simple:
+        enabled: false
+
 mqtt:
-  broker: tcp://localhost:1883
+  broker: ${MQTT_BROKER:tcp://localhost:1883}
   client-id: smart-oilfield-backend
-  username: admin
-  password: admin
+  username: ${MQTT_USER:admin}
+  password: ${MQTT_PASSWORD:admin}
   alarm-topic: oilfield/alarms
   allocation-topic: oilfield/allocation
   data-topic: oilfield/data/+

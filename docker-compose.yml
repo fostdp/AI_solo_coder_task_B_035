@@ -1,0 +1,207 @@
+version: '3.8'
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  postgres:
+    image: postgis/postgis:15-3.4
+    container_name: smart-oilfield-postgres
+    environment:
+      POSTGRES_DB: smart_oilfield
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      TZ: Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database/init_schema.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./database/partition.sql:/docker-entrypoint-initdb.d/02-partition.sql
+      - ./database/postgresql.conf:/etc/postgresql/postgresql.conf
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d smart_oilfield"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - smart-oilfield-net
+    logging: *default-logging
+
+  emqx:
+    image: emqx/emqx:5.3.2
+    container_name: smart-oilfield-emqx
+    environment:
+      EMQX_NAME: smart-oilfield-emqx
+      EMQX_HOST: 127.0.0.1
+      TZ: Asia/Shanghai
+      EMQX_MQTT__MAX_PACKET_SIZE: 1MB
+      EMQX_MQTT__QOS1_MAX_PENDING_MSGS: 10000
+      EMQX_MQTT__QOS2_MAX_PENDING_MSGS: 1000
+      EMQX_RETAINER__STORAGE_TYPE: built_in_database
+      EMQX_LISTENERS__TCP__DEFAULT__MAX_CONNECTIONS: 100000
+      EMQX_LISTENERS__TCP__DEFAULT__ACTIVE_N: 100
+    ports:
+      - "1883:1883"
+      - "8083:8083"
+      - "8883:8883"
+      - "18083:18083"
+    volumes:
+      - emqx-data:/opt/emqx/data
+      - emqx-log:/opt/emqx/log
+      - ./docker/emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "emqx_ctl status | grep -q 'is running'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - smart-oilfield-net
+    logging: *default-logging
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: smart-oilfield-backend
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/smart_oilfield
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_POOL_SIZE: 50
+      DB_POOL_MIN: 10
+      MQTT_BROKER: tcp://emqx:1883
+      MQTT_USER: admin
+      MQTT_PASSWORD: public
+      SPRING_PROFILES_ACTIVE: prod
+      TZ: Asia/Shanghai
+      JAVA_OPTS: -Xms2g -Xmx4g -XX:+UseG1GC -XX:MaxGCPauseMillis=200
+    ports:
+      - "8080:8080"
+    volumes:
+      - backend-logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+    networks:
+      - smart-oilfield-net
+    logging: *default-logging
+    restart: unless-stopped
+
+  frontend:
+    image: nginx:1.25-alpine
+    container_name: smart-oilfield-frontend
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "80:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - backend
+    networks:
+      - smart-oilfield-net
+    logging: *default-logging
+    restart: unless-stopped
+
+  dtu-simulator:
+    build:
+      context: ./simulator
+      dockerfile: Dockerfile
+    container_name: smart-oilfield-dtu-simulator
+    environment:
+      MQTT_BROKER: tcp://emqx:1883
+      MQTT_PORT: 1883
+      MQTT_USER: admin
+      MQTT_PASSWORD: public
+      INJECTION_WELL_COUNT: 300
+      PRODUCTION_WELL_COUNT: 500
+      WATER_CUT_RISE_TREND: 0.02
+      REPORT_SCHEDULE: "daily"
+      TZ: Asia/Shanghai
+    volumes:
+      - simulator-logs:/app/logs
+    depends_on:
+      emqx:
+        condition: service_healthy
+    networks:
+      - smart-oilfield-net
+    logging: *default-logging
+    restart: unless-stopped
+    profiles:
+      - simulator
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: smart-oilfield-prometheus
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    networks:
+      - smart-oilfield-net
+    logging: *default-logging
+    profiles:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:10.2.3
+    container_name: smart-oilfield-grafana
+    environment:
+      TZ: Asia/Shanghai
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    networks:
+      - smart-oilfield-net
+    logging: *default-logging
+    profiles:
+      - monitoring
+
+volumes:
+  postgres-data:
+    driver: local
+  emqx-data:
+    driver: local
+  emqx-log:
+    driver: local
+  backend-logs:
+    driver: local
+  simulator-logs:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+networks:
+  smart-oilfield-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
