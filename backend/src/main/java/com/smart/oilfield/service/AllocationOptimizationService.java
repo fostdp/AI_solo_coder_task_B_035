@@ -225,10 +225,255 @@ public class AllocationOptimizationService {
             Map<String, List<InjectionProductionRelation>> relations) {
 
         int n = injectionWells.size();
-        double[] coefficients = new double[n];
+        log.info("Solving linear program for {} injection wells", n);
 
+        if (n <= 50) {
+            return solveWithSimplex(injectionWells, currentInjection, waterFloodParams, relations);
+        } else {
+            return solveWithDualDecomposition(injectionWells, currentInjection, waterFloodParams, relations);
+        }
+    }
+
+    private double[] solveWithSimplex(
+            List<Well> injectionWells,
+            Map<String, Double> currentInjection,
+            Map<String, double[]> waterFloodParams,
+            Map<String, List<InjectionProductionRelation>> relations) {
+
+        int n = injectionWells.size();
+        double[] coefficients = buildCoefficients(injectionWells, waterFloodParams, relations);
+
+        LinearObjectiveFunction objective = new LinearObjectiveFunction(coefficients, 0);
+        List<LinearConstraint> constraints = buildConstraints(injectionWells, currentInjection);
+
+        try {
+            long start = System.currentTimeMillis();
+            SimplexSolver solver = new SimplexSolver();
+            PointValuePair solution = solver.optimize(
+                    new MaxIter(500),
+                    objective,
+                    new LinearConstraintSet(constraints),
+                    GoalType.MAXIMIZE,
+                    new NonNegativeConstraint(true)
+            );
+
+            log.info("Simplex solved {} variables in {}ms, objective: {}",
+                    n, System.currentTimeMillis() - start, solution.getValue());
+            return solution.getPoint();
+
+        } catch (Exception e) {
+            log.error("Simplex failed, using current values", e);
+            return getCurrentValues(injectionWells, currentInjection);
+        }
+    }
+
+    private double[] solveWithDualDecomposition(
+            List<Well> injectionWells,
+            Map<String, Double> currentInjection,
+            Map<String, double[]> waterFloodParams,
+            Map<String, List<InjectionProductionRelation>> relations) {
+
+        int n = injectionWells.size();
+        long start = System.currentTimeMillis();
+
+        Map<String, Integer> wellIndexMap = new HashMap<>();
         for (int i = 0; i < n; i++) {
-            Well injWell = injectionWells.get(i);
+            wellIndexMap.put(injectionWells.get(i).getWellId(), i);
+        }
+
+        Map<String, List<Integer>> subproblems = buildSubproblems(injectionWells, relations, wellIndexMap);
+        log.info("Decomposed into {} subproblems", subproblems.size());
+
+        double[] result = getCurrentValues(injectionWells, currentInjection);
+        double[] dualVariables = new double[subproblems.size()];
+        double stepSize = 0.01;
+        int maxIterations = 100;
+        double convergenceThreshold = 1e-6;
+
+        double totalTarget = currentInjection.values().stream().mapToDouble(Double::doubleValue).sum();
+        double[] subproblemWeights = new double[subproblems.size()];
+        int idx = 0;
+        for (List<Integer> subproblem : subproblems.values()) {
+            double subTotal = 0;
+            for (int wellIdx : subproblem) {
+                subTotal += currentInjection.getOrDefault(injectionWells.get(wellIdx).getWellId(), 0.0);
+            }
+            subproblemWeights[idx] = subTotal / totalTarget;
+            idx++;
+        }
+
+        for (int iteration = 0; iteration < maxIterations; iteration++) {
+            double[] newResult = new double[n];
+            System.arraycopy(result, 0, newResult, 0, n);
+
+            double primalResidual = 0;
+            int subIdx = 0;
+            for (Map.Entry<String, List<Integer>> entry : subproblems.entrySet()) {
+                List<Integer> subproblemIndices = entry.getValue();
+                double subTarget = totalTarget * subproblemWeights[subIdx] + dualVariables[subIdx];
+
+                double[] subSolution = solveSubproblem(
+                        injectionWells, subproblemIndices, currentInjection,
+                        waterFloodParams, relations, subTarget);
+
+                for (int i = 0; i < subproblemIndices.size(); i++) {
+                    int wellIdx = subproblemIndices.get(i);
+                    double diff = subSolution[i] - result[wellIdx];
+                    primalResidual += Math.abs(diff);
+                    newResult[wellIdx] = subSolution[i];
+                }
+                subIdx++;
+            }
+
+            double totalInjection = 0;
+            for (double v : newResult) {
+                totalInjection += v;
+            }
+            double balanceResidual = Math.abs(totalInjection - totalTarget) / totalTarget;
+
+            subIdx = 0;
+            for (List<Integer> subproblem : subproblems.values()) {
+                double subTotal = 0;
+                for (int wellIdx : subproblem) {
+                    subTotal += newResult[wellIdx];
+                }
+                double subTarget = totalTarget * subproblemWeights[subIdx];
+                dualVariables[subIdx] += stepSize * (subTotal - subTarget);
+                subIdx++;
+            }
+
+            double dualResidual = 0;
+            for (double d : dualVariables) {
+                dualResidual += Math.abs(d);
+            }
+
+            if (primalResidual < convergenceThreshold * n &&
+                balanceResidual < convergenceThreshold &&
+                iteration > 5) {
+                log.info("Dual decomposition converged at iteration {}, primal={}, balance={}",
+                        iteration, primalResidual, balanceResidual);
+                result = newResult;
+                break;
+            }
+
+            result = newResult;
+            stepSize = Math.max(stepSize * 0.99, 1e-4);
+        }
+
+        double totalInjection = 0;
+        for (double v : result) {
+            totalInjection += v;
+        }
+        double scalingFactor = totalTarget / totalInjection;
+        for (int i = 0; i < n; i++) {
+            double current = currentInjection.getOrDefault(injectionWells.get(i).getWellId(), 0.0);
+            double maxIncrease = current * (1 + MAX_WATER_INCREASE_RATE);
+            double maxDecrease = current * (1 - MAX_WATER_DECREASE_RATE);
+
+            result[i] = result[i] * scalingFactor;
+            result[i] = Math.min(result[i], maxIncrease);
+            result[i] = Math.max(result[i], Math.max(maxDecrease, 10.0));
+        }
+
+        log.info("Dual decomposition solved {} variables in {}ms",
+                n, System.currentTimeMillis() - start);
+        return result;
+    }
+
+    private Map<String, List<Integer>> buildSubproblems(
+            List<Well> injectionWells,
+            Map<String, List<InjectionProductionRelation>> relations,
+            Map<String, Integer> wellIndexMap) {
+
+        Map<String, List<Integer>> subproblems = new HashMap<>();
+        Map<String, String> wellToCommunity = new HashMap<>();
+        int nextCommunityId = 0;
+
+        for (Well injWell : injectionWells) {
+            String wellId = injWell.getWellId();
+            List<InjectionProductionRelation> wellRelations = relations.get(wellId);
+
+            if (wellRelations == null || wellRelations.isEmpty()) {
+                String community = "comm_" + (nextCommunityId++);
+                wellToCommunity.put(wellId, community);
+                subproblems.computeIfAbsent(community, k -> new ArrayList<>())
+                        .add(wellIndexMap.get(wellId));
+                continue;
+            }
+
+            Set<String> connectedCommunities = new HashSet<>();
+            for (InjectionProductionRelation rel : wellRelations) {
+                String prodWellId = rel.getProductionWellId();
+                for (Well otherWell : injectionWells) {
+                    String otherWellId = otherWell.getWellId();
+                    if (otherWellId.equals(wellId)) continue;
+                    List<InjectionProductionRelation> otherRelations = relations.get(otherWellId);
+                    if (otherRelations != null) {
+                        boolean connected = otherRelations.stream()
+                                .anyMatch(r -> prodWellId.equals(r.getProductionWellId()));
+                        if (connected && wellToCommunity.containsKey(otherWellId)) {
+                            connectedCommunities.add(wellToCommunity.get(otherWellId));
+                        }
+                    }
+                }
+            }
+
+            String targetCommunity;
+            if (connectedCommunities.isEmpty()) {
+                targetCommunity = "comm_" + (nextCommunityId++);
+            } else {
+                targetCommunity = connectedCommunities.iterator().next();
+                for (String otherCommunity : connectedCommunities) {
+                    if (!otherCommunity.equals(targetCommunity)) {
+                        List<Integer> wellsToMove = subproblems.remove(otherCommunity);
+                        if (wellsToMove != null) {
+                            subproblems.get(targetCommunity).addAll(wellsToMove);
+                            for (int wellIdx : wellsToMove) {
+                                String movedWellId = injectionWells.get(wellIdx).getWellId();
+                                wellToCommunity.put(movedWellId, targetCommunity);
+                            }
+                        }
+                    }
+                }
+            }
+
+            wellToCommunity.put(wellId, targetCommunity);
+            subproblems.computeIfAbsent(targetCommunity, k -> new ArrayList<>())
+                    .add(wellIndexMap.get(wellId));
+        }
+
+        int maxSubproblemSize = 40;
+        Map<String, List<Integer>> finalSubproblems = new HashMap<>();
+        int splitCounter = 0;
+        for (Map.Entry<String, List<Integer>> entry : subproblems.entrySet()) {
+            List<Integer> wells = entry.getValue();
+            if (wells.size() <= maxSubproblemSize) {
+                finalSubproblems.put(entry.getKey(), wells);
+            } else {
+                for (int i = 0; i < wells.size(); i += maxSubproblemSize) {
+                    int end = Math.min(i + maxSubproblemSize, wells.size());
+                    String splitKey = entry.getKey() + "_split_" + (splitCounter++);
+                    finalSubproblems.put(splitKey, new ArrayList<>(wells.subList(i, end)));
+                }
+            }
+        }
+
+        return finalSubproblems;
+    }
+
+    private double[] solveSubproblem(
+            List<Well> allInjectionWells,
+            List<Integer> subproblemIndices,
+            Map<String, Double> currentInjection,
+            Map<String, double[]> waterFloodParams,
+            Map<String, List<InjectionProductionRelation>> relations,
+            double subTarget) {
+
+        int m = subproblemIndices.size();
+        double[] coefficients = new double[m];
+
+        for (int i = 0; i < m; i++) {
+            Well injWell = allInjectionWells.get(subproblemIndices.get(i));
             List<InjectionProductionRelation> wellRelations = relations.get(injWell.getWellId());
 
             double oilGainCoefficient = 0;
@@ -248,8 +493,90 @@ public class AllocationOptimizationService {
         }
 
         LinearObjectiveFunction objective = new LinearObjectiveFunction(coefficients, 0);
-
         List<LinearConstraint> constraints = new ArrayList<>();
+
+        double[] equalityCoeff = new double[m];
+        double subCurrentTotal = 0;
+        for (int i = 0; i < m; i++) {
+            equalityCoeff[i] = 1.0;
+            subCurrentTotal += currentInjection.getOrDefault(
+                    allInjectionWells.get(subproblemIndices.get(i)).getWellId(), 0.0);
+        }
+
+        double constraintTarget = subTarget > 0 ? subTarget : subCurrentTotal;
+        constraints.add(new LinearConstraint(equalityCoeff, Relationship.EQ, constraintTarget));
+
+        for (int i = 0; i < m; i++) {
+            double current = currentInjection.getOrDefault(
+                    allInjectionWells.get(subproblemIndices.get(i)).getWellId(), 0.0);
+            double maxIncrease = current * (1 + MAX_WATER_INCREASE_RATE);
+            double maxDecrease = current * (1 - MAX_WATER_DECREASE_RATE);
+
+            double[] boundCoeff = new double[m];
+            boundCoeff[i] = 1.0;
+            constraints.add(new LinearConstraint(boundCoeff, Relationship.LEQ, maxIncrease));
+            constraints.add(new LinearConstraint(boundCoeff, Relationship.GEQ, Math.max(maxDecrease, 10.0)));
+        }
+
+        try {
+            SimplexSolver solver = new SimplexSolver();
+            PointValuePair solution = solver.optimize(
+                    new MaxIter(300),
+                    objective,
+                    new LinearConstraintSet(constraints),
+                    GoalType.MAXIMIZE,
+                    new NonNegativeConstraint(true)
+            );
+            return solution.getPoint();
+        } catch (Exception e) {
+            double[] result = new double[m];
+            for (int i = 0; i < m; i++) {
+                result[i] = currentInjection.getOrDefault(
+                        allInjectionWells.get(subproblemIndices.get(i)).getWellId(), 0.0);
+            }
+            return result;
+        }
+    }
+
+    private double[] buildCoefficients(
+            List<Well> injectionWells,
+            Map<String, double[]> waterFloodParams,
+            Map<String, List<InjectionProductionRelation>> relations) {
+
+        int n = injectionWells.size();
+        double[] coefficients = new double[n];
+
+        for (int i = 0; i < n; i++) {
+            Well injWell = injectionWells.get(i);
+            List<InjectionProductionRelation> wellRelations = relations.get(injWell.getWellId());
+
+            double oilGainCoefficient = 0;
+            double waterCutPenalty = 0;
+
+            if (wellRelations != null) {
+                for (InjectionProductionRelation rel : wellRelations) {
+                    double[] params = waterFloodParams.get(rel.getProductionWellId());
+                    if (params != null) {
+                        double effectiveness = rel.getEffectivenessDegree() != null ?
+                                rel.getEffectivenessDegree() / 100.0 : 0.5;
+                        oilGainCoefficient += params[0] * effectiveness * 1000;
+                        waterCutPenalty += params[2] * effectiveness * 500;
+                    }
+                }
+            }
+
+            coefficients[i] = oilGainCoefficient - waterCutPenalty;
+        }
+
+        return coefficients;
+    }
+
+    private List<LinearConstraint> buildConstraints(
+            List<Well> injectionWells,
+            Map<String, Double> currentInjection) {
+
+        int n = injectionWells.size();
+        List<LinearConstraint> constraints = new ArrayList<>(2 * n + 1);
 
         double[] equalityCoeff = new double[n];
         double totalCurrentInjection = 0;
@@ -273,27 +600,16 @@ public class AllocationOptimizationService {
             constraints.add(new LinearConstraint(lowerBound, Relationship.GEQ, Math.max(maxDecrease, 10.0)));
         }
 
-        try {
-            SimplexSolver solver = new SimplexSolver();
-            PointValuePair solution = solver.optimize(
-                    new MaxIter(1000),
-                    objective,
-                    new LinearConstraintSet(constraints),
-                    GoalType.MAXIMIZE,
-                    new NonNegativeConstraint(true)
-            );
+        return constraints;
+    }
 
-            log.info("Optimization successful, objective value: {}", solution.getValue());
-            return solution.getPoint();
-
-        } catch (Exception e) {
-            log.error("Linear programming failed, using current values", e);
-            double[] result = new double[n];
-            for (int i = 0; i < n; i++) {
-                result[i] = currentInjection.getOrDefault(injectionWells.get(i).getWellId(), 0.0);
-            }
-            return result;
+    private double[] getCurrentValues(List<Well> injectionWells, Map<String, Double> currentInjection) {
+        int n = injectionWells.size();
+        double[] result = new double[n];
+        for (int i = 0; i < n; i++) {
+            result[i] = currentInjection.getOrDefault(injectionWells.get(i).getWellId(), 0.0);
         }
+        return result;
     }
 
     private String generateReason(Well well, double current, double suggested,

@@ -26,10 +26,11 @@ public class MqttConfig {
         options.setServerURIs(new String[]{broker});
         options.setUserName(username);
         options.setPassword(password.toCharArray());
-        options.setCleanSession(true);
+        options.setCleanSession(false);
         options.setConnectionTimeout(10);
         options.setKeepAliveInterval(30);
         options.setAutomaticReconnect(true);
+        options.setMaxInflight(1000);
         factory.setConnectionOptions(options);
         return factory;
     }

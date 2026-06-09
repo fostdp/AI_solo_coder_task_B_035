@@ -6,6 +6,14 @@ spring:
     username: postgres
     password: postgres
     driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 50
+      minimum-idle: 10
+      idle-timeout: 300000
+      connection-timeout: 30000
+      max-lifetime: 1800000
+      leak-detection-threshold: 60000
+      pool-name: SmartOilfieldHikariPool
   jpa:
     hibernate:
       ddl-auto: none
@@ -14,6 +22,10 @@ spring:
       hibernate:
         dialect: org.hibernate.spatial.dialect.postgis.PostgisPG10Dialect
         format_sql: true
+        jdbc:
+          batch_size: 50
+          order_inserts: true
+          order_updates: true
   jackson:
     date-format: yyyy-MM-dd HH:mm:ss
     time-zone: GMT+8
@@ -30,6 +42,10 @@ mqtt:
   password: admin
   alarm-topic: oilfield/alarms
   data-topic: oilfield/data/+
+  message-expiry-seconds: 300
+  max-offline-messages: 1000
+  max-retry-attempts: 3
+  flush-interval-ms: 10000
 
 allocation:
   schedule: "0 0 2 * * ?"
